@@ -233,7 +233,6 @@
             <button type="button" data-kind="element">Accessible</button>
             <button type="button" data-kind="container">Container</button>
           </div>
-          <div class="muted" id="node-name" style="margin-top:8px;"></div>
         </div>
 
         <div id="kind-note" class="section hidden">
@@ -737,8 +736,7 @@ function renderList() {
     row.innerHTML =
       '<div class="vo-grip" title="Drag to reorder">⠿</div>' +
       '<div class="vo-num">' + (isContainer ? "" : elemNum) + "</div>" +
-      '<div class="vo-text"><div class="vo-utterance">' + utteranceHTML(item.ann) +
-      '</div><div class="vo-name">' + esc(item.name) + "</div></div>" +
+      '<div class="vo-text"><div class="vo-utterance">' + utteranceHTML(item.ann) + "</div></div>" +
       '<div class="vo-reorder">' +
         '<button class="ro-btn up" ' + (num === 1 ? "disabled" : "") + ' title="Move up">▲</button>' +
         '<button class="ro-btn down" ' + (last ? "disabled" : "") + ' title="Move down">▼</button>' +
@@ -843,7 +841,6 @@ onmessage = (event) => {
       ann = Object.assign(blankAnnotation(), msg.node.ann || {});
       document.getElementById("no-selection").classList.add("hidden");
       document.getElementById("inspector").classList.remove("hidden");
-      document.getElementById("node-name").textContent = msg.node.name + "  ·  " + msg.node.type.toLowerCase();
       renderForm();
       updatePreview();
     }

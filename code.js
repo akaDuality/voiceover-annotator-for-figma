@@ -454,28 +454,22 @@ async function regeneratePanel(frame, forceCreate) {
   title.layoutSizingHorizontal = "FILL"; // fill panel width (after it's in the layout)
   title.textAutoResize = "HEIGHT";
 
-  let n = 0;
   items.forEach((item) => {
     const u = item.u;
     const isContainer = u.container;
-    const prefix = isContainer ? "" : ++n + ".  ";
 
     const t = figma.createText();
     t.fontName = { family: "Inter", style: isContainer ? "Semi Bold" : "Regular" };
     t.fontSize = isContainer ? 15 : 14;
     t.lineHeight = { value: 150, unit: "PERCENT" };
-    t.characters = prefix + u.text;
+    t.characters = u.text;
     t.fills = [{ type: "SOLID", color: COL.text }];
-    if (prefix) t.setRangeFills(0, prefix.length, [{ type: "SOLID", color: COL.num }]);
-    const off = prefix.length;
     for (const r of u.traitRanges) {
-      t.setRangeFontName(off + r.start, off + r.end, { family: "Inter", style: "Medium" });
-      t.setRangeFills(off + r.start, off + r.end, [{ type: "SOLID", color: COL.trait }]);
+      t.setRangeFontName(r.start, r.end, { family: "Inter", style: "Medium" });
+      t.setRangeFills(r.start, r.end, [{ type: "SOLID", color: COL.trait }]);
     }
     if (u.hintRange) {
-      t.setRangeFills(off + u.hintRange.start, off + u.hintRange.end, [
-        { type: "SOLID", color: COL.hint },
-      ]);
+      t.setRangeFills(u.hintRange.start, u.hintRange.end, [{ type: "SOLID", color: COL.hint }]);
     }
 
     if (item.depth > 0) {
