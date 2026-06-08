@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<style>
+  :root {
+    --accent: var(--figma-color-bg-brand, #0d99ff);
+    --accent-text: var(--figma-color-text-onbrand, #fff);
+    --bg: var(--figma-color-bg, #fff);
+    --bg-secondary: var(--figma-color-bg-secondary, #f5f5f5);
+    --bg-hover: var(--figma-color-bg-hover, #f0f0f0);
+    --text: var(--figma-color-text, #1e1e1e);
+    --text-secondary: var(--figma-color-text-secondary, #767676);
+    --border: var(--figma-color-border, #e6e6e6);
+    --border-strong: var(--figma-color-border-strong, #b3b3b3);
+    --purple: #9747ff;
+    --green: #1ba463;
+    --blue: #0d99ff;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: Inter, -apple-system, "SF Pro Text", system-ui, sans-serif;
+    font-size: 11px; line-height: 1.4;
+    color: var(--text); background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+  body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+  /* ---- Live VoiceOver preview header ---- */
+  .preview {
+    padding: 14px 16px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+    flex: 0 0 auto;
+  }
+  .preview .speaker {
+    font-size: 9px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-secondary); margin-bottom: 5px; display: flex; align-items: center; gap: 5px;
+  }
+  .preview .utterance {
+    font-size: 15px; font-weight: 600; line-height: 1.3; word-break: break-word;
+  }
+  .preview .utterance .label { font-style: normal; }
+  .preview .utterance .trait { color: var(--purple); }
+  .preview .utterance.empty { color: var(--text-secondary); font-weight: 400; font-size: 12px; }
+
+  /* ---- Tabs ---- */
+  .tabs {
+    display: flex; flex: 0 0 auto; border-bottom: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .tab {
+    flex: 1; padding: 9px 8px; text-align: center; cursor: pointer;
+    font-weight: 500; color: var(--text-secondary);
+    border-bottom: 2px solid transparent; user-select: none;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab .count {
+    display: inline-block; min-width: 15px; padding: 0 4px; margin-left: 4px;
+    border-radius: 8px; background: var(--bg-hover); font-size: 9px; line-height: 14px;
+  }
+
+  .scroll { flex: 1 1 auto; overflow-y: auto; }
+  .page { display: none; }
+  .page.active { display: block; }
+
+  /* ---- Inspector form ---- */
+  .section { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .section.tight { padding: 10px 16px; }
+  .section-title {
+    font-weight: 600; font-size: 11px; margin: 0 0 9px; letter-spacing: .01em;
+  }
+  label.field { display: block; margin-bottom: 9px; }
+  label.field:last-child { margin-bottom: 0; }
+  .field-label {
+    display: block; font-weight: 600; margin-bottom: 4px; color: var(--text);
+  }
+  input[type="text"], textarea, select {
+    width: 100%; padding: 7px 8px; border: 1px solid var(--border-strong);
+    border-radius: 5px; background: var(--bg); color: var(--text);
+    font-family: inherit; font-size: 11px; outline: none;
+  }
+  input[type="text"]:focus, textarea:focus, select:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 46px; }
+
+  .row { display: flex; align-items: center; gap: 8px; }
+  .row.between { justify-content: space-between; }
+
+  /* checkbox + toggle */
+  .check { display: flex; align-items: center; gap: 7px; cursor: pointer; padding: 2px 0; }
+  .check input { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+  .check span { user-select: none; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
+
+  /* value rows */
+  .value-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .value-row input[type="radio"] { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); }
+  .value-row input[type="text"] { flex: 1; }
+  .icon-btn {
+    border: 1px solid var(--border-strong); background: var(--bg); color: var(--text-secondary);
+    width: 24px; height: 26px; border-radius: 5px; cursor: pointer; font-size: 14px; line-height: 1;
+    display: flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  }
+  .icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+
+  button.btn {
+    border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
+    padding: 6px 11px; border-radius: 6px; cursor: pointer; font-family: inherit;
+    font-size: 11px; font-weight: 500;
+  }
+  button.btn:hover { background: var(--bg-hover); }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.btn.primary:hover { filter: brightness(1.06); }
+  button.btn.danger:hover { background: #ffe5e5; border-color: #ffb3b3; color: #c00; }
+  button.btn.full { width: 100%; }
+
+  .actions-list .action-row { display: flex; gap: 6px; margin-bottom: 6px; }
+  .actions-list .action-row input { flex: 1; }
+
+  /* ---- VoiceOver list (left panel mirror) ---- */
+  .vo-item {
+    display: flex; gap: 9px; padding: 9px 16px; cursor: pointer; align-items: flex-start;
+    border-bottom: 1px solid var(--border);
+  }
+  .vo-item:hover { background: var(--bg-hover); }
+  .vo-item.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .vo-num {
+    flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--bg-hover); color: var(--text-secondary);
+    font-size: 9px; font-weight: 600; display: flex; align-items: center; justify-content: center;
+    margin-top: 1px;
+  }
+  .vo-item.sel .vo-num { background: var(--accent); color: var(--accent-text); }
+  .vo-text { flex: 1; min-width: 0; }
+  .vo-utterance { font-size: 12px; line-height: 1.35; word-break: break-word; }
+  .vo-utterance .trait { color: var(--purple); font-weight: 500; }
+  .vo-name { font-size: 9px; color: var(--text-secondary); margin-top: 2px; }
+
+  .vo-grip {
+    flex: 0 0 auto; cursor: grab; color: var(--text-secondary); padding: 2px 1px;
+    margin-top: 1px; user-select: none; line-height: 1;
+  }
+  .vo-grip:active { cursor: grabbing; }
+  .vo-reorder { flex: 0 0 auto; display: flex; flex-direction: column; gap: 2px; }
+  .ro-btn {
+    width: 20px; height: 16px; border: 1px solid var(--border); background: var(--bg);
+    color: var(--text-secondary); border-radius: 4px; cursor: pointer; font-size: 8px;
+    line-height: 1; display: flex; align-items: center; justify-content: center; padding: 0;
+  }
+  .ro-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+  .ro-btn:disabled { opacity: .3; cursor: default; }
+  .vo-item.dragging { opacity: .45; }
+  .vo-item.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+  .vo-item.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
+  .list-hint {
+    padding: 8px 16px; font-size: 10px; color: var(--text-secondary);
+    border-bottom: 1px solid var(--border); background: var(--bg-secondary);
+  }
+
+  .empty-state {
+    padding: 40px 24px; text-align: center; color: var(--text-secondary); font-size: 12px;
+  }
+  .empty-state svg { opacity: .4; margin-bottom: 10px; }
+
+  /* footer */
+  .footer {
+    flex: 0 0 auto; display: flex; gap: 8px; padding: 10px 16px;
+    border-top: 1px solid var(--border); background: var(--bg);
+  }
+  .footer .btn { flex: 1; }
+
+  .hidden { display: none !important; }
+  .muted { color: var(--text-secondary); }
+
+  /* segmented control */
+  .segmented {
+    display: flex; background: var(--bg-hover); border-radius: 7px; padding: 2px; gap: 2px;
+  }
+  .segmented button {
+    flex: 1; border: none; background: transparent; color: var(--text-secondary);
+    font-family: inherit; font-size: 10px; font-weight: 500; padding: 6px 4px;
+    border-radius: 5px; cursor: pointer; white-space: nowrap;
+  }
+  .segmented button:hover { color: var(--text); }
+  .segmented button.active { background: var(--bg); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.14); }
+
+  .vo-utterance .container-label { font-weight: 600; }
+  .vo-item.is-container { background: var(--bg-secondary); }
+  .vo-item.is-container .vo-num { visibility: hidden; }
+
+  /* resize grip */
+  #resize {
+    position: fixed; right: 0; bottom: 0; width: 16px; height: 16px;
+    cursor: nwse-resize; z-index: 50; color: var(--border-strong);
+  }
+  #resize:hover { color: var(--text-secondary); }
+  #resize svg { display: block; }
+</style>
+</head>
+<body>
+
+  <!-- Live VoiceOver utterance preview -->
+  <div class="preview">
+    <div class="speaker">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 00-2.5-4.03v8.05A4.5 4.5 0 0016.5 12z"/></svg>
+      VoiceOver speaks
+    </div>
+    <div class="utterance empty" id="preview">Select a layer to annotate</div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab active" data-tab="inspect">Inspector</div>
+    <div class="tab" data-tab="list">Reading order <span class="count" id="list-count">0</span></div>
+  </div>
+
+  <div class="scroll">
+    <!-- ============ INSPECTOR ============ -->
+    <div class="page active" id="page-inspect">
+      <div id="no-selection" class="empty-state">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+        <div>Select a layer on the canvas to give it<br/>an accessibility annotation.</div>
+      </div>
+
+      <div id="inspector" class="hidden">
+        <!-- Element kind -->
+        <div class="section tight">
+          <div class="segmented" id="kind-seg">
+            <button type="button" data-kind="ignored">Non-accessible</button>
+            <button type="button" data-kind="element">Accessible</button>
+            <button type="button" data-kind="container">Container</button>
+          </div>
+          <div class="muted" id="node-name" style="margin-top:8px;"></div>
+        </div>
+
+        <div id="kind-note" class="section hidden">
+          <span class="muted">This layer is hidden from VoiceOver — it won't be announced or appear in the reading order.</span>
+        </div>
+
+        <div id="fields">
+          <!-- Label -->
+          <div class="section">
+            <label class="field">
+              <span class="field-label">Label</span>
+              <input type="text" id="label" placeholder="What the element is, e.g. “Size”" />
+            </label>
+            <div id="value-section">
+            <label class="field">
+              <span class="field-label">Value</span>
+              <input type="text" id="value" placeholder="Current value, e.g. “Medium”" />
+            </label>
+            <label class="check">
+              <input type="checkbox" id="adjustable" />
+              <span>Adjustable (user can change the value)</span>
+            </label>
+
+            <div id="enum-block" class="hidden" style="margin-top:8px;">
+              <div class="row between" style="margin-bottom:6px;">
+                <span class="field-label" style="margin:0;">Enumerated values</span>
+                <label class="check" style="font-weight:500;">
+                  <input type="checkbox" id="enumerated" />
+                  <span>Enumerated</span>
+                </label>
+              </div>
+              <div id="values-list"></div>
+              <button class="btn" id="add-value" style="margin-top:4px;">+ Add value</button>
+            </div>
+            </div><!-- /value-section -->
+          </div>
+
+          <!-- Traits -->
+          <div class="section" id="traits-section">
+            <div class="section-title">Traits</div>
+            <div class="grid2" id="traits-grid"></div>
+          </div>
+
+          <!-- Text traits -->
+          <div class="section" id="texttraits-section">
+            <div class="section-title">Text traits</div>
+            <div class="grid2" id="text-traits-grid"></div>
+          </div>
+
+          <!-- Custom actions -->
+          <div class="section" id="actions-section">
+            <div class="section-title">Custom actions</div>
+            <div class="actions-list" id="actions-list"></div>
+            <button class="btn" id="add-action">+ Add custom action</button>
+          </div>
+
+          <!-- Custom description + hint -->
+          <div class="section" id="desc-section">
+            <label class="field">
+              <span class="field-label">Custom description</span>
+              <textarea id="customDescription" placeholder="Overrides the generated description"></textarea>
+            </label>
+            <label class="field">
+              <span class="field-label">Hint</span>
+              <input type="text" id="hint" placeholder="Spoken after a pause, e.g. “Double tap to open”" />
+            </label>
+          </div>
+        </div>
+
+        <div class="section">
+          <button class="btn danger full" id="delete">Remove annotation</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ READING ORDER LIST ============ -->
+    <div class="page" id="page-list">
+      <div id="list-empty" class="empty-state">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+        <div>No annotations yet.<br/>Annotate layers to build the reading order.</div>
+      </div>
+      <div class="list-hint" id="list-hint">Drag rows — or use ▲▼ — to set the VoiceOver reading order.</div>
+      <div id="list"></div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <button class="btn primary full" id="panel">Generate description panel next to frame</button>
+  </div>
+  <div class="footer" style="border-top:none; padding-top:0;">
+    <button class="btn" id="highlight">Highlight</button>
+    <button class="btn" id="clear-highlight">Clear</button>
+    <button class="btn" id="copy">Copy script</button>
+  </div>
+
+  <!-- resize grip -->
+  <div id="resize" title="Drag to resize">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">
+      <path d="M11 15L15 11M6.5 15L15 6.5"/>
+    </svg>
+  </div>
+
+<script>
+// ===========================================================================
+// Trait catalogue (mirrors UIAccessibilityTraits)
+// ===========================================================================
+const TRAITS = [
+  { key: "button", label: "Button" },
+  { key: "selected", label: "Selected" },
+  { key: "disabled", label: "Disabled" },
+  { key: "switcher", label: "Switcher" },
+  { key: "link", label: "Link" },
+  { key: "image", label: "Image" },
+  { key: "updatesFrequently", label: "Updates frequently" },
+  { key: "summaryElement", label: "Summary element" },
+  { key: "playsSound", label: "Plays sound" },
+  { key: "startsMediaSession", label: "Starts media session" },
+  { key: "allowsDirectInteraction", label: "Allows direct interaction" },
+  { key: "causesPageTurn", label: "Causes page turn" },
+];
+const TEXT_TRAITS = [
+  { key: "header", label: "Header" },
+  { key: "staticText", label: "Static text" },
+  { key: "textInput", label: "Text Input" },
+  { key: "searchField", label: "Search Field" },
+  { key: "isEditing", label: "Is editing" },
+  { key: "keyboardKey", label: "Keyboard key" },
+];
+
+// ===========================================================================
+// State
+// ===========================================================================
+let currentId = null;
+let ann = blankAnnotation();
+let listData = [];
+let saveTimer = null;
+
+function blankAnnotation() {
+  // no `kind` here: annKind() defaults undefined -> "element" and still
+  // migrates legacy { isAccessible:false } records merged on top of this.
+  return {
+    label: "",
+    value: "",
+    adjustable: false,
+    enumerated: false,
+    values: [],
+    selectedIndex: 0,
+    traits: [],
+    textTraits: [],
+    customActions: [],
+    customDescription: "",
+    hint: "",
+  };
+}
+
+// migrate older annotations (isAccessible bool) -> kind
+function annKind(a) {
+  if (!a) return "element";
+  if (a.kind) return a.kind;
+  return a.isAccessible === false ? "ignored" : "element";
+}
+
+// ===========================================================================
+// VoiceOver utterance generation
+// ===========================================================================
+function resolveValue(a) {
+  if (a.adjustable && a.enumerated && a.values && a.values.length) {
+    const idx = Math.min(Math.max(a.selectedIndex || 0, 0), a.values.length - 1);
+    return a.values[idx] || "";
+  }
+  return (a.value || "").trim();
+}
+
+// returns { main, traits:[...] }  -> traits are highlighted in a different color
+function utteranceParts(a) {
+  if (!a) return null;
+  const kind = annKind(a);
+  if (kind === "ignored") return null;
+  if (kind === "container") {
+    const label = (a.label || "").trim();
+    if (!label) return null;
+    return { main: label, traits: [], hint: "", container: true };
+  }
+
+  if (a.customDescription && a.customDescription.trim()) {
+    return { main: a.customDescription.trim(), traits: [], hint: (a.hint || "").trim() };
+  }
+
+  const label = (a.label || "").trim();
+  const value = resolveValue(a);
+  let main = "";
+  if (label && value) main = label + ": " + value;
+  else main = label || value;
+
+  // adjustable position "2 of 3"
+  if (a.adjustable && a.enumerated && a.values && a.values.length > 1) {
+    const pos = Math.min(Math.max(a.selectedIndex || 0, 0), a.values.length - 1) + 1;
+    main += ", " + pos + " of " + a.values.length;
+  }
+
+  const traits = [];
+  const t = a.traits || [];
+  const tt = a.textTraits || [];
+  if (t.indexOf("selected") !== -1) traits.push("Selected");
+  if (tt.indexOf("header") !== -1) traits.push("Heading");
+  if (a.adjustable || t.indexOf("adjustable") !== -1) traits.push("Adjustable");
+  if (t.indexOf("button") !== -1) traits.push("Button");
+  if (t.indexOf("switcher") !== -1) traits.push("Switch Button");
+  if (t.indexOf("link") !== -1) traits.push("Link");
+  if (t.indexOf("image") !== -1) traits.push("Image");
+  if (tt.indexOf("searchField") !== -1) traits.push("Search Field");
+  if (tt.indexOf("textInput") !== -1) traits.push("Text Field");
+  if (t.indexOf("disabled") !== -1) traits.push("Dimmed");
+
+  return { main, traits, hint: (a.hint || "").trim() };
+}
+
+function utteranceText(a) {
+  const p = utteranceParts(a);
+  if (!p) return "";
+  let s = p.main;
+  for (const tr of p.traits) s += ". " + tr;
+  if (p.traits.length) s += ".";
+  if (p.hint) s += (s.endsWith(".") || s === "" ? " " : ". ") + p.hint;
+  return s.trim();
+}
+
+function utteranceHTML(a) {
+  const p = utteranceParts(a);
+  if (!p) {
+    return annKind(a) === "ignored"
+      ? '<span class="muted">Hidden from VoiceOver</span>'
+      : '<span class="muted">No label yet</span>';
+  }
+  if (p.container) return '<span class="container-label">' + esc(p.main) + "</span>";
+  if (!p.main && !p.traits.length) return '<span class="muted">No label yet</span>';
+  let html = '<span class="label">' + esc(p.main) + "</span>";
+  for (const tr of p.traits) html += '. <span class="trait">' + esc(tr) + "</span>";
+  if (p.traits.length) html += ".";
+  if (p.hint) html += ' <span class="muted">' + esc(p.hint) + "</span>";
+  return html;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// ===========================================================================
+// Build static form (checkboxes)
+// ===========================================================================
+function buildChecks(containerId, defs, group) {
+  const c = document.getElementById(containerId);
+  c.innerHTML = "";
+  for (const d of defs) {
+    const lab = document.createElement("label");
+    lab.className = "check";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset.group = group;
+    input.dataset.key = d.key;
+    const span = document.createElement("span");
+    span.textContent = d.label;
+    lab.appendChild(input);
+    lab.appendChild(span);
+    c.appendChild(lab);
+    input.addEventListener("change", () => {
+      const arr = ann[group];
+      const i = arr.indexOf(d.key);
+      if (input.checked && i === -1) arr.push(d.key);
+      if (!input.checked && i !== -1) arr.splice(i, 1);
+      onChange();
+    });
+  }
+}
+buildChecks("traits-grid", TRAITS, "traits");
+buildChecks("text-traits-grid", TEXT_TRAITS, "textTraits");
+
+// ===========================================================================
+// Render the form from `ann`
+// ===========================================================================
+function renderForm() {
+  const kind = annKind(ann);
+
+  // segmented control active state
+  document.querySelectorAll("#kind-seg button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.kind === kind);
+  });
+
+  document.getElementById("label").value = ann.label || "";
+  document.getElementById("value").value = ann.value || "";
+  document.getElementById("adjustable").checked = !!ann.adjustable;
+  document.getElementById("enumerated").checked = !!ann.enumerated;
+  document.getElementById("customDescription").value = ann.customDescription || "";
+  document.getElementById("hint").value = ann.hint || "";
+
+  document.querySelectorAll('input[data-group="traits"]').forEach((el) => {
+    el.checked = (ann.traits || []).indexOf(el.dataset.key) !== -1;
+  });
+  document.querySelectorAll('input[data-group="textTraits"]').forEach((el) => {
+    el.checked = (ann.textTraits || []).indexOf(el.dataset.key) !== -1;
+  });
+
+  document.getElementById("enum-block").classList.toggle("hidden", !ann.adjustable);
+  renderValues();
+  renderActions();
+
+  // field visibility per kind:
+  //  ignored   -> only the note, no fields
+  //  container -> Label only
+  //  element   -> everything
+  const isIgnored = kind === "ignored";
+  const isContainer = kind === "container";
+  document.getElementById("kind-note").classList.toggle("hidden", !isIgnored);
+  document.getElementById("fields").classList.toggle("hidden", isIgnored);
+  const elementOnly = isContainer ? "none" : "";
+  document.getElementById("value-section").style.display = elementOnly;
+  document.getElementById("traits-section").style.display = elementOnly;
+  document.getElementById("texttraits-section").style.display = elementOnly;
+  document.getElementById("actions-section").style.display = elementOnly;
+  document.getElementById("desc-section").style.display = elementOnly;
+}
+
+function renderValues() {
+  const list = document.getElementById("values-list");
+  list.innerHTML = "";
+  (ann.values || []).forEach((v, i) => {
+    const row = document.createElement("div");
+    row.className = "value-row";
+
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "selectedValue";
+    radio.checked = (ann.selectedIndex || 0) === i;
+    radio.addEventListener("change", () => { ann.selectedIndex = i; onChange(); });
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = v;
+    input.addEventListener("input", () => { ann.values[i] = input.value; onChange(); });
+
+    const del = document.createElement("button");
+    del.className = "icon-btn";
+    del.textContent = "−";
+    del.title = "Remove value";
+    del.addEventListener("click", () => {
+      ann.values.splice(i, 1);
+      if (ann.selectedIndex >= ann.values.length) ann.selectedIndex = Math.max(0, ann.values.length - 1);
+      renderValues(); onChange();
+    });
+
+    row.appendChild(radio);
+    row.appendChild(input);
+    row.appendChild(del);
+    list.appendChild(row);
+  });
+}
+
+function renderActions() {
+  const list = document.getElementById("actions-list");
+  list.innerHTML = "";
+  (ann.customActions || []).forEach((a, i) => {
+    const row = document.createElement("div");
+    row.className = "action-row";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = a;
+    input.placeholder = "Action name";
+    input.addEventListener("input", () => { ann.customActions[i] = input.value; onChange(); });
+    const del = document.createElement("button");
+    del.className = "icon-btn";
+    del.textContent = "−";
+    del.addEventListener("click", () => { ann.customActions.splice(i, 1); renderActions(); onChange(); });
+    row.appendChild(input);
+    row.appendChild(del);
+    list.appendChild(row);
+  });
+}
+
+// ===========================================================================
+// Change handling -> live preview + debounced save
+// ===========================================================================
+function onChange() {
+  updatePreview();
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, 220);
+}
+
+function updatePreview() {
+  const el = document.getElementById("preview");
+  if (!currentId) {
+    el.className = "utterance empty";
+    el.textContent = "Select a layer to annotate";
+    return;
+  }
+  el.className = "utterance";
+  el.innerHTML = utteranceHTML(ann);
+}
+
+function save() {
+  if (!currentId) return;
+  parent.postMessage({ pluginMessage: { type: "save", id: currentId, annotation: ann } }, "*");
+}
+
+// wire simple text inputs
+function bind(id, prop, isCheckbox) {
+  const el = document.getElementById(id);
+  el.addEventListener(isCheckbox ? "change" : "input", () => {
+    ann[prop] = isCheckbox ? el.checked : el.value;
+    if (id === "adjustable") {
+      document.getElementById("enum-block").classList.toggle("hidden", !ann.adjustable);
+    }
+    onChange();
+  });
+}
+bind("label", "label");
+bind("value", "value");
+bind("hint", "hint");
+bind("customDescription", "customDescription");
+bind("adjustable", "adjustable", true);
+bind("enumerated", "enumerated", true);
+
+// element-kind segmented control
+document.querySelectorAll("#kind-seg button").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    ann.kind = btn.dataset.kind;
+    delete ann.isAccessible; // kind supersedes the legacy flag
+    renderForm();
+    onChange();
+  });
+});
+
+document.getElementById("add-value").addEventListener("click", () => {
+  if (!ann.values) ann.values = [];
+  ann.values.push("");
+  renderValues(); onChange();
+});
+document.getElementById("add-action").addEventListener("click", () => {
+  if (!ann.customActions) ann.customActions = [];
+  ann.customActions.push("");
+  renderActions(); onChange();
+});
+document.getElementById("delete").addEventListener("click", () => {
+  if (!currentId) return;
+  parent.postMessage({ pluginMessage: { type: "delete", id: currentId } }, "*");
+});
+
+// ===========================================================================
+// Tabs
+// ===========================================================================
+document.querySelectorAll(".tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+    document.querySelectorAll(".page").forEach((p) => p.classList.remove("active"));
+    tab.classList.add("active");
+    document.getElementById("page-" + tab.dataset.tab).classList.add("active");
+  });
+});
+
+// ===========================================================================
+// Reading order list
+// ===========================================================================
+let dragFrom = null;
+
+function sendReorder() {
+  parent.postMessage(
+    { pluginMessage: { type: "reorder", ids: listData.map((x) => x.id) } },
+    "*"
+  );
+}
+
+// move item at index `from` to index `to` within listData, then persist
+function moveItem(from, to) {
+  if (to < 0 || to >= listData.length || from === to) return;
+  const moved = listData.splice(from, 1)[0];
+  listData.splice(to, 0, moved);
+  renderList();
+  sendReorder();
+}
+
+function renderList() {
+  const wrap = document.getElementById("list");
+  const visible = listData.filter((item) => utteranceText(item.ann));
+  document.getElementById("list-count").textContent = visible.length;
+  document.getElementById("list-empty").classList.toggle("hidden", visible.length > 0);
+  document.getElementById("list-hint").classList.toggle("hidden", visible.length === 0);
+  wrap.innerHTML = "";
+
+  let num = 0;     // visible position (for first/last button state)
+  let elemNum = 0; // element-only number shown (containers aren't numbered)
+  listData.forEach((item, i) => {
+    if (!utteranceText(item.ann)) return;
+    num++;
+    const isContainer = annKind(item.ann) === "container";
+    if (!isContainer) elemNum++;
+    const last = num === visible.length;
+    const row = document.createElement("div");
+    row.className = "vo-item" + (item.id === currentId ? " sel" : "") + (isContainer ? " is-container" : "");
+    row.draggable = true;
+    row.style.paddingLeft = 16 + (item.depth || 0) * 14 + "px";
+    row.innerHTML =
+      '<div class="vo-grip" title="Drag to reorder">⠿</div>' +
+      '<div class="vo-num">' + (isContainer ? "" : elemNum) + "</div>" +
+      '<div class="vo-text"><div class="vo-utterance">' + utteranceHTML(item.ann) +
+      '</div><div class="vo-name">' + esc(item.name) + "</div></div>" +
+      '<div class="vo-reorder">' +
+        '<button class="ro-btn up" ' + (num === 1 ? "disabled" : "") + ' title="Move up">▲</button>' +
+        '<button class="ro-btn down" ' + (last ? "disabled" : "") + ' title="Move down">▼</button>' +
+      "</div>";
+
+    row.addEventListener("click", () => {
+      parent.postMessage({ pluginMessage: { type: "select", id: item.id } }, "*");
+    });
+    row.querySelector(".ro-btn.up").addEventListener("click", (e) => {
+      e.stopPropagation();
+      moveItem(i, prevVisibleIndex(i));
+    });
+    row.querySelector(".ro-btn.down").addEventListener("click", (e) => {
+      e.stopPropagation();
+      moveItem(i, nextVisibleIndex(i));
+    });
+
+    // drag & drop
+    row.addEventListener("dragstart", (e) => {
+      dragFrom = i;
+      row.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+    });
+    row.addEventListener("dragend", () => {
+      dragFrom = null;
+      wrap.querySelectorAll(".vo-item").forEach((r) =>
+        r.classList.remove("dragging", "drop-before", "drop-after"));
+    });
+    row.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (dragFrom === null || dragFrom === i) return;
+      row.classList.toggle("drop-before", i < dragFrom);
+      row.classList.toggle("drop-after", i > dragFrom);
+    });
+    row.addEventListener("dragleave", () => row.classList.remove("drop-before", "drop-after"));
+    row.addEventListener("drop", (e) => {
+      e.preventDefault();
+      if (dragFrom === null || dragFrom === i) return;
+      moveItem(dragFrom, i);
+      dragFrom = null;
+    });
+
+    wrap.appendChild(row);
+  });
+}
+
+// neighbouring indices that are actually visible (skip empty-utterance items)
+function prevVisibleIndex(i) {
+  for (let j = i - 1; j >= 0; j--) if (utteranceText(listData[j].ann)) return j;
+  return i;
+}
+function nextVisibleIndex(i) {
+  for (let j = i + 1; j < listData.length; j++) if (utteranceText(listData[j].ann)) return j;
+  return i;
+}
+
+// ===========================================================================
+// Footer actions
+// ===========================================================================
+document.getElementById("panel").addEventListener("click", () =>
+  parent.postMessage({ pluginMessage: { type: "panel" } }, "*"));
+document.getElementById("highlight").addEventListener("click", () =>
+  parent.postMessage({ pluginMessage: { type: "highlight" } }, "*"));
+document.getElementById("clear-highlight").addEventListener("click", () =>
+  parent.postMessage({ pluginMessage: { type: "clear-highlight" } }, "*"));
+document.getElementById("copy").addEventListener("click", () => {
+  const script = listData
+    .map((item, i) => (i + 1) + ". " + utteranceText(item.ann))
+    .filter((s) => s.replace(/^\d+\.\s*/, "").length)
+    .join("\n");
+  copyText(script || "No annotations to copy.");
+});
+
+function copyText(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); } catch (e) {}
+  document.body.removeChild(ta);
+  const btn = document.getElementById("copy");
+  const old = btn.textContent;
+  btn.textContent = "Copied ✓";
+  setTimeout(() => (btn.textContent = old), 1200);
+}
+
+// ===========================================================================
+// Messages from the plugin
+// ===========================================================================
+onmessage = (event) => {
+  const msg = event.data.pluginMessage;
+  if (!msg) return;
+
+  if (msg.type === "selection") {
+    if (!msg.node) {
+      currentId = null;
+      document.getElementById("no-selection").classList.remove("hidden");
+      document.getElementById("inspector").classList.add("hidden");
+      updatePreview();
+    } else {
+      currentId = msg.node.id;
+      ann = Object.assign(blankAnnotation(), msg.node.ann || {});
+      document.getElementById("no-selection").classList.add("hidden");
+      document.getElementById("inspector").classList.remove("hidden");
+      document.getElementById("node-name").textContent = msg.node.name + "  ·  " + msg.node.type.toLowerCase();
+      renderForm();
+      updatePreview();
+    }
+    if (msg.list) { listData = msg.list; renderList(); }
+  }
+
+  if (msg.type === "list") {
+    listData = msg.list || [];
+    renderList();
+  }
+};
+
+// ===========================================================================
+// Window resize handle
+// ===========================================================================
+(function () {
+  const handle = document.getElementById("resize");
+  const MIN_W = 320, MIN_H = 360;
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    const startX = e.clientX, startY = e.clientY;
+    const startW = window.innerWidth, startH = window.innerHeight;
+    const onMove = (ev) => {
+      const w = Math.max(MIN_W, Math.round(startW + ev.clientX - startX));
+      const h = Math.max(MIN_H, Math.round(startH + ev.clientY - startY));
+      parent.postMessage({ pluginMessage: { type: "resize", width: w, height: h } }, "*");
+    };
+    const onUp = (ev) => {
+      handle.releasePointerCapture(e.pointerId);
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+  });
+})();
+
+parent.postMessage({ pluginMessage: { type: "ready" } }, "*");
+</script>
+</body>
+</html>
