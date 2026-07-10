@@ -179,6 +179,13 @@
   .hidden { display: none !important; }
   .muted { color: var(--text-secondary); }
 
+  /* settings overlay */
+  .overlay-panel {
+    position: fixed; inset: 0; z-index: 100; background: var(--bg);
+    padding: 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto;
+  }
+  .overlay-panel select { width: 100%; }
+
   /* segmented control */
   .segmented {
     display: flex; background: var(--bg-hover); border-radius: 7px; padding: 2px; gap: 2px;
@@ -253,7 +260,7 @@
             <div id="value-section">
             <label class="field">
               <span class="field-label">Value</span>
-              <input type="text" id="value" placeholder="Current value, e.g. “Medium”" autocomplete="off" />
+              <textarea id="value" rows="2" placeholder="Current value, e.g. “Medium”" autocomplete="off"></textarea>
             </label>
             <label class="check">
               <input type="checkbox" id="adjustable" />
@@ -327,9 +334,48 @@
     <button class="btn primary full" id="panel">Generate description panel next to frame</button>
   </div>
   <div class="footer" style="border-top:none; padding-top:0;">
+    <button class="btn full" id="native-annotate">Annotate with native Figma annotations (Dev Mode)</button>
+  </div>
+  <div class="footer" style="border-top:none; padding-top:0;">
     <button class="btn" id="highlight">Highlight</button>
     <button class="btn" id="clear-highlight">Clear</button>
     <button class="btn" id="copy">Copy script</button>
+  </div>
+  <div class="footer" style="border-top:none; padding-top:0;">
+    <button class="btn" id="ai-annotate">Generate with AI</button>
+    <button class="btn" id="heuristic-annotate">Quick suggest</button>
+    <button class="btn" id="settings-btn" title="AI settings" style="flex:0 0 auto; width:34px;">⚙</button>
+  </div>
+  <div class="footer" style="border-top:none; padding-top:0;">
+    <button class="btn full" id="export-vodesign">Export .vodesign</button>
+  </div>
+
+  <!-- AI settings overlay -->
+  <div id="settings-panel" class="overlay-panel hidden">
+    <div class="section-title">AI settings</div>
+    <label class="field">
+      <span class="field-label">Provider</span>
+      <select id="ai-provider">
+        <option value="anthropic">Anthropic — Claude (Opus 4.8)</option>
+        <option value="openai">OpenAI — GPT-4o</option>
+      </select>
+    </label>
+    <label class="field">
+      <span class="field-label">Anthropic API key <span id="anthropic-status" class="muted"></span></span>
+      <input type="password" id="anthropic-key" placeholder="sk-ant-…" autocomplete="off" />
+    </label>
+    <label class="field">
+      <span class="field-label">OpenAI API key <span id="openai-status" class="muted"></span></span>
+      <input type="password" id="openai-key" placeholder="sk-…" autocomplete="off" />
+    </label>
+    <span class="muted" style="font-size:10px;">
+      Keys are stored only on your machine via <code>figma.clientStorage</code> — they never travel with the file
+      and are sent solely to the provider you select. Leave a field blank to keep the saved key.
+    </span>
+    <div class="row" style="gap:8px; margin-top:4px;">
+      <button class="btn primary" id="save-settings">Save</button>
+      <button class="btn" id="close-settings">Close</button>
+    </div>
   </div>
 
   <!-- resize grip -->
@@ -900,10 +946,55 @@ function nextVisibleIndex(i) {
 // ===========================================================================
 document.getElementById("panel").addEventListener("click", () =>
   parent.postMessage({ pluginMessage: { type: "panel" } }, "*"));
+document.getElementById("native-annotate").addEventListener("click", () =>
+  parent.postMessage({ pluginMessage: { type: "native-annotate" } }, "*"));
 document.getElementById("highlight").addEventListener("click", () =>
   parent.postMessage({ pluginMessage: { type: "highlight" } }, "*"));
 document.getElementById("clear-highlight").addEventListener("click", () =>
   parent.postMessage({ pluginMessage: { type: "clear-highlight" } }, "*"));
+document.getElementById("export-vodesign").addEventListener("click", () => {
+  const btn = document.getElementById("export-vodesign");
+  btn.disabled = true;
+  btn.textContent = "Exporting…";
+  parent.postMessage({ pluginMessage: { type: "export-vodesign" } }, "*");
+});
+
+// ---------------------------------------------------------------------------
+// AI / heuristic auto-annotation + settings
+// ---------------------------------------------------------------------------
+function setAnnotateBusy(busy) {
+  const ai = document.getElementById("ai-annotate");
+  const heur = document.getElementById("heuristic-annotate");
+  ai.disabled = busy;
+  heur.disabled = busy;
+  ai.textContent = busy ? "Generating…" : "Generate with AI";
+}
+document.getElementById("ai-annotate").addEventListener("click", () => {
+  setAnnotateBusy(true);
+  parent.postMessage({ pluginMessage: { type: "ai-annotate" } }, "*");
+});
+document.getElementById("heuristic-annotate").addEventListener("click", () =>
+  parent.postMessage({ pluginMessage: { type: "heuristic-annotate" } }, "*"));
+
+function openSettings() {
+  document.getElementById("settings-panel").classList.remove("hidden");
+  parent.postMessage({ pluginMessage: { type: "get-settings" } }, "*");
+}
+document.getElementById("settings-btn").addEventListener("click", openSettings);
+document.getElementById("close-settings").addEventListener("click", () =>
+  document.getElementById("settings-panel").classList.add("hidden"));
+document.getElementById("save-settings").addEventListener("click", () => {
+  const anthInput = document.getElementById("anthropic-key");
+  const oaInput = document.getElementById("openai-key");
+  parent.postMessage({ pluginMessage: {
+    type: "save-settings",
+    provider: document.getElementById("ai-provider").value,
+    anthropicKey: anthInput.value,
+    openaiKey: oaInput.value,
+  } }, "*");
+  anthInput.value = "";
+  oaInput.value = "";
+});
 document.getElementById("copy").addEventListener("click", () => {
   const lines = [];
   listData.forEach((item) => {
@@ -965,7 +1056,159 @@ onmessage = (event) => {
     listData = msg.list || [];
     renderList();
   }
+
+  if (msg.type === "save-markup") {
+    saveMarkup(msg);
+  }
+
+  if (msg.type === "settings") {
+    document.getElementById("ai-provider").value = msg.provider || "anthropic";
+    document.getElementById("anthropic-status").textContent = msg.hasAnthropic ? "— saved" : "— not set";
+    document.getElementById("openai-status").textContent = msg.hasOpenAI ? "— saved" : "— not set";
+  }
+
+  if (msg.type === "annotate-done") {
+    setAnnotateBusy(false);
+    if (msg.openSettings) openSettings();
+  }
 };
+
+// ===========================================================================
+// Save a .vodesign package (controls.json + info.json + screen.png).
+// Uses the File System Access API when available, else downloads a ZIP.
+// Ported from the "Voice Over Markup" plugin.
+// ===========================================================================
+function resetExportButton() {
+  const btn = document.getElementById("export-vodesign");
+  btn.disabled = false;
+  btn.textContent = "Export .vodesign";
+}
+
+async function saveMarkup(msg) {
+  try {
+    // Preferred path: write the folder directly via File System Access API.
+    if (window.showDirectoryPicker) {
+      try {
+        const dirHandle = await window.showDirectoryPicker();
+        let folderHandle;
+        try {
+          folderHandle = await dirHandle.getDirectoryHandle(msg.folderName, { create: true });
+        } catch (e) {
+          try { await dirHandle.removeEntry(msg.folderName, { recursive: true }); } catch (e2) {}
+          folderHandle = await dirHandle.getDirectoryHandle(msg.folderName, { create: true });
+        }
+        await writeFile(folderHandle, "controls.json", msg.controlsJson);
+        await writeFile(folderHandle, "info.json", msg.infoJson);
+        await writeFile(folderHandle, "screen.png", new Blob([new Uint8Array(msg.pngData)], { type: "image/png" }));
+        resetExportButton();
+        parent.postMessage({ pluginMessage: { type: "saved" } }, "*");
+        return;
+      } catch (fsError) {
+        // user cancelled the picker, or the API failed — fall through to ZIP
+        if (fsError && fsError.name === "AbortError") { resetExportButton(); return; }
+      }
+    }
+
+    // Fallback: build a stored (uncompressed) ZIP with the folder inside.
+    const enc = new TextEncoder();
+    const entries = [
+      makeZipEntry(msg.folderName + "/controls.json", enc.encode(msg.controlsJson)),
+      makeZipEntry(msg.folderName + "/info.json", enc.encode(msg.infoJson)),
+      makeZipEntry(msg.folderName + "/screen.png", new Uint8Array(msg.pngData)),
+    ];
+    downloadBlob(buildZip(entries), msg.folderName + ".zip");
+    resetExportButton();
+    parent.postMessage({ pluginMessage: { type: "saved" } }, "*");
+  } catch (error) {
+    resetExportButton();
+    parent.postMessage({ pluginMessage: { type: "saved" } }, "*");
+  }
+}
+
+async function writeFile(folderHandle, name, data) {
+  const handle = await folderHandle.getFileHandle(name, { create: true });
+  const writer = await handle.createWritable();
+  await writer.write(data);
+  await writer.close();
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  setTimeout(() => { document.body.removeChild(link); URL.revokeObjectURL(url); }, 500);
+}
+
+// --- minimal stored-ZIP writer (no compression) ---
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) c = c & 1 ? (c >>> 1) ^ 0xedb88320 : c >>> 1;
+    t[i] = c;
+  }
+  return t;
+})();
+function crc32(data) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < data.length; i++) crc = CRC_TABLE[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+function makeZipEntry(filename, data) {
+  const nameBytes = new TextEncoder().encode(filename);
+  const bytes = new Uint8Array(data);
+  const crc = crc32(bytes);
+  const local = new ArrayBuffer(30 + nameBytes.length);
+  const lv = new DataView(local);
+  lv.setUint32(0, 0x04034b50, true);
+  lv.setUint16(4, 20, true);
+  lv.setUint16(8, 0, true); // stored
+  lv.setUint32(14, crc, true);
+  lv.setUint32(18, bytes.length, true);
+  lv.setUint32(22, bytes.length, true);
+  lv.setUint16(26, nameBytes.length, true);
+  new Uint8Array(local).set(nameBytes, 30);
+  const central = new ArrayBuffer(46 + nameBytes.length);
+  const cv = new DataView(central);
+  cv.setUint32(0, 0x02014b50, true);
+  cv.setUint16(4, 20, true);
+  cv.setUint16(6, 20, true);
+  cv.setUint32(16, crc, true);
+  cv.setUint32(20, bytes.length, true);
+  cv.setUint32(24, bytes.length, true);
+  cv.setUint16(28, nameBytes.length, true);
+  new Uint8Array(central).set(nameBytes, 46);
+  return { local, data: bytes, central };
+}
+function buildZip(entries) {
+  let offset = 0;
+  for (const e of entries) {
+    new DataView(e.central).setUint32(42, offset, true);
+    offset += e.local.byteLength + e.data.length;
+  }
+  const parts = [];
+  for (const e of entries) { parts.push(e.local); parts.push(e.data); }
+  const centralStart = offset;
+  let centralSize = 0;
+  for (const e of entries) { parts.push(e.central); centralSize += e.central.byteLength; }
+  const end = new ArrayBuffer(22);
+  const ev = new DataView(end);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(8, entries.length, true);
+  ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, centralSize, true);
+  ev.setUint32(16, centralStart, true);
+  parts.push(end);
+  const total = parts.reduce((s, p) => s + p.byteLength, 0);
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const p of parts) { out.set(new Uint8Array(p), pos); pos += p.byteLength; }
+  return new Blob([out], { type: "application/zip" });
+}
 
 // ===========================================================================
 // Window resize handle

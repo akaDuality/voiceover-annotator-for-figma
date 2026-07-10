@@ -9,6 +9,7 @@
   "capabilities": [],
   "enableProposedApi": false,
   "networkAccess": {
-    "allowedDomains": ["none"]
+    "allowedDomains": ["https://api.anthropic.com", "https://api.openai.com"],
+    "reasoning": "Sends the selected frame's layer structure to Anthropic or OpenAI to generate accessibility annotations."
   }
 }

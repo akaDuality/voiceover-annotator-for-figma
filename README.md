@@ -1,8 +1,9 @@
 # VoiceOver Annotator — Figma plugin
 
 Annotate Figma frames with iOS accessibility settings and get the generated
-VoiceOver reading aloud — the way [VoiceLab / Apple's Accessibility Inspector]
-works, but inside Figma.
+VoiceOver reading aloud — the way [VoiceOver Designer](https://github.com/akaDuality/VoiceOverDesigner)
+and [Apple's Accessibility Inspector](https://developer.apple.com/documentation/accessibility/accessibility-inspector)
+work, but inside Figma.
 
 - **Inspector** (mirrors the right panel): set Label, Value, Adjustable values,
   Traits, Text traits, Custom actions, Custom description and Hint per layer.
@@ -57,3 +58,10 @@ Button / Link / Image / …) → Dimmed.
 | `manifest.json` | Plugin manifest                                     |
 | `code.js`       | Main thread — reads/writes `pluginData`, builds list, draws highlights |
 | `ui.html`       | Inspector + reading-order UI and utterance generator |
+
+## Related
+
+- [VoiceOver Designer](https://github.com/akaDuality/VoiceOverDesigner) — desktop app that reads the `.vodesign` format (with containers) this plugin can export to.
+- [iOS Accessibility Skill](https://github.com/akaDuality/iOSAccessibilitySkill) — Claude Code skill with the iOS accessibility rules (label → value → trait) used to guide AI annotation.
+- [*About accessibility on iOS*](https://rubanov.dev/a11y-book/) — the book by Mikhail Rubanov the skill is based on.
+- [Apple's Accessibility Inspector](https://developer.apple.com/documentation/accessibility/accessibility-inspector) — Apple's tool for auditing accessibility.

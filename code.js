@@ -10,6 +10,11 @@ const SIZE_KEY = "a11y-window-size";
 const MIN_W = 320;
 const MIN_H = 360;
 
+// AI settings — stored locally per user via figma.clientStorage (never in the file).
+const AI_PROVIDER_KEY = "a11y-ai-provider";
+const ANTHROPIC_KEY = "a11y-anthropic-key";
+const OPENAI_KEY = "a11y-openai-key";
+
 // restore the last window size the user dragged to
 figma.clientStorage
   .getAsync(SIZE_KEY)
@@ -319,9 +324,9 @@ async function pushSelection() {
       name: node.name,
       type: node.type,
       ann: readAnnotation(node),
-      // Label ← first text layer; Value ← the remaining text layers combined.
+      // Label ← first text layer; Value ← the remaining text layers, one per row.
       labelText: textParts[0] || "",
-      valueText: textParts.slice(1).join(" "),
+      valueText: textParts.slice(1).join("\n"),
     },
     frame: { id: frame.id, name: frame.name },
     list: buildList(frame),
@@ -557,6 +562,341 @@ async function regeneratePanel(frame, forceCreate) {
 }
 
 // ---------------------------------------------------------------------------
+// .vodesign export (VoiceOver Designer markup)
+// ---------------------------------------------------------------------------
+
+// this plugin's string trait keys -> VoiceOver Designer numeric trait bitmask
+const TRAIT_BITS = {
+  button: 1, header: 2, adjustable: 4, switcher: 4, link: 8, selected: 16,
+  image: 32, staticText: 64, summaryElement: 128, updatesFrequently: 256,
+  playsSound: 512, startsMediaSession: 1024, allowsDirectInteraction: 2048,
+  causesPageTurn: 4096, textInput: 8192, isEditing: 16384, searchField: 32768,
+  keyboardKey: 65536, disabled: 131072,
+};
+
+function traitsToBitmask(a) {
+  let bits = 0;
+  const add = (k) => { if (TRAIT_BITS[k]) bits |= TRAIT_BITS[k]; };
+  (a.traits || []).forEach(add);
+  (a.textTraits || []).forEach(add);
+  if (a.adjustable) bits |= TRAIT_BITS.adjustable;
+  return bits;
+}
+
+// hex-only UUID (VoiceOver Designer requires 0-9 A-F)
+function newUUID() {
+  const chars = "0123456789ABCDEF";
+  let s = "";
+  for (let i = 0; i < 36; i++) {
+    s += i === 8 || i === 13 || i === 18 || i === 23 ? "-" : chars[Math.floor(Math.random() * 16)];
+  }
+  return s;
+}
+
+// Build controls.json in the reading order the user set (manual `order`),
+// elements only — containers are intentionally skipped for now (see issue).
+function buildControls(frame) {
+  const fb = frame.absoluteBoundingBox;
+  return hierarchicalItems(frame)
+    .filter((x) => annKind(x.ann) === "element")
+    .map(({ node, ann }) => {
+      const b = node.absoluteBoundingBox;
+      const x = fb && b ? Math.round(b.x - fb.x) : 0;
+      const y = fb && b ? Math.round(b.y - fb.y) : 0;
+      const w = b ? Math.round(b.width) : 0;
+      const h = b ? Math.round(b.height) : 0;
+      const enumerated = !!(ann.adjustable && ann.enumerated);
+      return {
+        hint: (ann.hint || "").trim(),
+        id: newUUID(),
+        frame: [[x, y], [w, h]],
+        customActions: {
+          names: (ann.customActions || []).map((s) => (s || "").trim()).filter(Boolean),
+        },
+        isAccessibilityElement: true,
+        customDescriptions: { descriptions: [] },
+        label: (ann.label || "").trim(),
+        adjustableOptions: {
+          options: enumerated ? (ann.values || []).slice() : [],
+          isEnumerated: !!ann.enumerated,
+        },
+        value: resolveValue(ann),
+        trait: traitsToBitmask(ann),
+      };
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Native Figma annotations (shown in Dev Mode)
+// ---------------------------------------------------------------------------
+
+// Find the built-in "Accessibility" annotation category, else the first one.
+async function accessibilityCategoryId() {
+  if (!figma.annotations || !figma.annotations.getAnnotationCategoriesAsync) return undefined;
+  try {
+    const cats = await figma.annotations.getAnnotationCategoriesAsync();
+    const a11y = cats.find((c) => /accessib/i.test(c.label || ""));
+    const chosen = a11y || cats[0];
+    return chosen ? chosen.id : undefined;
+  } catch (e) {
+    return undefined;
+  }
+}
+
+// Write each annotated element/container's utterance as a native Figma
+// annotation on its node (visible in Dev Mode). Replaces the node's existing
+// annotations so re-running stays idempotent.
+async function syncNativeAnnotations(frame) {
+  const categoryId = await accessibilityCategoryId();
+  let count = 0;
+  for (const { node, ann } of hierarchicalItems(frame)) {
+    if (!("annotations" in node)) continue;
+    const u = buildUtterance(ann);
+    if (!u || !u.text) continue;
+    const subs = subLinesOf(ann);
+    const label = u.text + subs.map((s) => "\n• " + s).join("");
+    try {
+      node.annotations = [categoryId ? { label, categoryId } : { label }];
+      count++;
+    } catch (e) {}
+  }
+  return count;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-annotation — local heuristic + AI (Anthropic / OpenAI)
+// ---------------------------------------------------------------------------
+
+// VoiceOver Designer numeric trait bitmask -> this plugin's string trait model.
+function bitmaskToAnn(trait) {
+  trait = trait || 0;
+  const traits = [];
+  const textTraits = [];
+  const has = (bit) => (trait & bit) !== 0;
+  if (has(1)) traits.push("button");
+  if (has(8)) traits.push("link");
+  if (has(16)) traits.push("selected");
+  if (has(32)) traits.push("image");
+  if (has(128)) traits.push("summaryElement");
+  if (has(256)) traits.push("updatesFrequently");
+  if (has(512)) traits.push("playsSound");
+  if (has(1024)) traits.push("startsMediaSession");
+  if (has(2048)) traits.push("allowsDirectInteraction");
+  if (has(4096)) traits.push("causesPageTurn");
+  if (has(131072)) traits.push("disabled");
+  if (has(2)) textTraits.push("header");
+  if (has(64)) textTraits.push("staticText");
+  if (has(8192)) textTraits.push("textInput");
+  if (has(16384)) textTraits.push("isEditing");
+  if (has(32768)) textTraits.push("searchField");
+  if (has(65536)) textTraits.push("keyboardKey");
+  return { traits, textTraits, adjustable: has(4) };
+}
+
+// Local, name-based fallback analyzer. Returns [{ node, ann }] in our model.
+function guessTraits(name, type) {
+  if (/header|title|заголовок|название/.test(name)) return { traits: [], textTraits: ["header"] };
+  if (/tab/.test(name)) return { traits: ["button", "causesPageTurn"], textTraits: [] };
+  if (/button|btn|back|cell|ячейка|кнопка|item|элемент/.test(name)) return { traits: ["button"], textTraits: [] };
+  if (type === "TEXT") return { traits: [], textTraits: ["staticText"] };
+  return { traits: ["button"], textTraits: [] };
+}
+
+function heuristicAnnotations(frame) {
+  const out = [];
+  const visit = (n) => {
+    if (n.visible === false) return;
+    const name = (n.name || "").toLowerCase();
+    if (name.includes("status bar")) return;
+    const include =
+      /cell|button|btn|tab|header|title|ячейка|кнопка|заголовок/.test(name) ||
+      n.type === "TEXT" || n.type === "INSTANCE";
+    const decorative =
+      /background|container|wrapper/.test(name) ||
+      (name.includes("icon") && !name.includes("button"));
+    if (include && !decorative) {
+      const parts = innerTextParts(n);
+      const t = guessTraits(name, n.type);
+      out.push({
+        node: n,
+        ann: {
+          kind: "element",
+          label: (parts[0] || n.name || "").trim(),
+          value: parts.slice(1).join(" ").trim(),
+          hint: "",
+          adjustable: false,
+          enumerated: false,
+          values: [],
+          selectedIndex: 0,
+          traits: t.traits,
+          textTraits: t.textTraits,
+          customActions: [],
+          customDescriptions: [],
+        },
+      });
+      return; // treat as one element; don't descend into it
+    }
+    if ("children" in n) for (const c of n.children) visit(c);
+  };
+  if ("children" in frame) for (const c of frame.children) visit(c);
+  return out;
+}
+
+// Layer tree (with nodeId + frame-relative coords + text) sent to the AI.
+function collectFrameData(frame) {
+  const fb = frame.absoluteBoundingBox;
+  const visit = (n) => {
+    if (n.visible === false) return null;
+    if ((n.name || "").toLowerCase().includes("status bar")) return null;
+    const b = n.absoluteBoundingBox;
+    const d = {
+      nodeId: n.id,
+      name: n.name,
+      type: n.type,
+      x: fb && b ? Math.round(b.x - fb.x) : 0,
+      y: fb && b ? Math.round(b.y - fb.y) : 0,
+      width: b ? Math.round(b.width) : 0,
+      height: b ? Math.round(b.height) : 0,
+    };
+    if (n.type === "TEXT" && typeof n.characters === "string") {
+      const t = n.characters.replace(/\s+/g, " ").trim();
+      if (t) d.text = t;
+    }
+    if ("children" in n) {
+      const kids = [];
+      for (const c of n.children) {
+        const cd = visit(c);
+        if (cd) kids.push(cd);
+      }
+      if (kids.length) d.children = kids;
+    }
+    return d;
+  };
+  const out = [];
+  if ("children" in frame) {
+    for (const c of frame.children) {
+      const cd = visit(c);
+      if (cd) out.push(cd);
+    }
+  }
+  return out;
+}
+
+// Distilled from the iOS Accessibility Skill (github.com/akaDuality/iOSAccessibilitySkill).
+const AI_SKILL =
+  'Follow the iOS Accessibility Skill (github.com/akaDuality/iOSAccessibilitySkill), based on the book "About accessibility on iOS" by Mikhail Rubanov.\n\n' +
+  "Structure every element as label -> value -> trait:\n" +
+  '- label: the name / main content the user scans for. Keep it short. NEVER put the element type ("button", "cell", "image") in the label — the trait already says it.\n' +
+  '- value: secondary or additional content, or the current state (e.g. "On", "3 of 5"). Empty if there is none.\n' +
+  "- trait: the role/state as a bitmask, summed: button 1, header 2, adjustable/switch 4, link 8, selected 16, image 32, static text 64, updates frequently 256, text input 8192, is editing 16384, search field 32768, disabled 131072. Combine, e.g. selected button = 17.\n" +
+  "- hint: what happens on activation (optional, starts with a verb).\n\n" +
+  "Rules:\n" +
+  "- One accessibility element per meaningful control. Collapse a cell/row into ONE element (label = title, value = subtitle/detail).\n" +
+  "- Interactive layers (buttons, cells, tabs, links) set the button/link bit.\n" +
+  "- Headings and section titles set the header bit (2).\n" +
+  "- Adjustable controls (segmented, stepper, slider, switch) set bit 4; put the choices in options and set isEnumerated true.\n" +
+  "- Hide decorative layers (icons, avatars, chevrons, backgrounds) — do NOT emit them.\n" +
+  "- Skip the status bar.";
+
+function buildAIPrompt(frameName, frameData) {
+  return (
+    AI_SKILL +
+    '\n\nAnalyze the Figma frame "' + frameName + '" and produce VoiceOver annotations.\n' +
+    "Layer tree (JSON; coordinates are relative to the frame):\n" +
+    JSON.stringify(frameData) +
+    "\n\nReturn ONLY a JSON object of exactly this shape, no prose:\n" +
+    '{"elements":[{"nodeId":"<echo this layer\'s nodeId>","label":"","value":"","hint":"","trait":1,"options":[],"isEnumerated":false,"actions":[]}]}'
+  );
+}
+
+// Calls the selected provider and returns the parsed elements array.
+async function generateWithAI(provider, key, frameName, frameData) {
+  const prompt = buildAIPrompt(frameName, frameData);
+  let content;
+  if (provider === "openai") {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: "You output only valid JSON." },
+          { role: "user", content: prompt },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error((e.error && e.error.message) || "OpenAI HTTP " + res.status);
+    }
+    const data = await res.json();
+    content = data.choices[0].message.content;
+  } else {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4-8",
+        max_tokens: 8000,
+        system: "You output only valid JSON.",
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error((e.error && e.error.message) || "Anthropic HTTP " + res.status);
+    }
+    const data = await res.json();
+    content = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("");
+  }
+  content = (content || "").trim();
+  if (content.indexOf("```") === 0) {
+    content = content.replace(/^```[a-zA-Z]*\n?/, "").replace(/```\s*$/, "").trim();
+  }
+  const parsed = JSON.parse(content);
+  return Array.isArray(parsed) ? parsed : parsed.elements || parsed.controls || [];
+}
+
+// Writes AI/heuristic results into pluginData, skipping already-annotated nodes.
+async function applyGenerated(elements) {
+  let created = 0;
+  let skipped = 0;
+  for (const el of elements) {
+    if (!el || !el.nodeId) continue;
+    const node = await figma.getNodeByIdAsync(el.nodeId);
+    if (!node || node.removed || !("setPluginData" in node)) continue;
+    if (readAnnotation(node)) { skipped++; continue; } // keep existing manual work
+    const m = bitmaskToAnn(el.trait || 0);
+    const options = Array.isArray(el.options) ? el.options : [];
+    try {
+      writeAnnotation(node, {
+        kind: "element",
+        label: (el.label || "").trim(),
+        value: (el.value || "").trim(),
+        hint: (el.hint || "").trim(),
+        adjustable: m.adjustable,
+        enumerated: m.adjustable && !!el.isEnumerated,
+        values: m.adjustable ? options : [],
+        selectedIndex: 0,
+        traits: m.traits,
+        textTraits: m.textTraits,
+        customActions: Array.isArray(el.actions) ? el.actions.filter(Boolean) : [],
+        customDescriptions: [],
+      });
+      created++;
+    } catch (e) {}
+  }
+  return { created, skipped };
+}
+
+// ---------------------------------------------------------------------------
 // Messages from the UI
 // ---------------------------------------------------------------------------
 
@@ -646,10 +986,161 @@ figma.ui.onmessage = async (msg) => {
       break;
     }
 
+    case "native-annotate": {
+      const selection = figma.currentPage.selection;
+      if (selection.length === 0) {
+        figma.notify("Select a frame to annotate.");
+        break;
+      }
+      const frame = topLevelFrameOf(selection[0]);
+      let n;
+      try {
+        n = await syncNativeAnnotations(frame);
+      } catch (e) {
+        figma.notify("Couldn't add Figma annotations here.", { error: true });
+        break;
+      }
+      figma.notify(
+        n ? "Added " + n + " Figma annotation" + (n === 1 ? "" : "s") + " — open Dev Mode to see them."
+          : "No annotated elements to mark."
+      );
+      break;
+    }
+
     case "clear-highlight":
       clearHighlights();
       figma.notify("Highlights removed.");
       break;
+
+    case "export-vodesign": {
+      const selection = figma.currentPage.selection;
+      if (selection.length === 0) {
+        figma.notify("Select a frame to export.");
+        break;
+      }
+      const frame = topLevelFrameOf(selection[0]);
+      if (!("exportAsync" in frame)) {
+        figma.notify("This selection can't be exported to .vodesign.", { error: true });
+        break;
+      }
+      const controls = buildControls(frame);
+      if (controls.length === 0) {
+        figma.notify("No annotated elements in this frame to export.");
+        break;
+      }
+      let pngData;
+      try {
+        pngData = await frame.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: 3 } });
+      } catch (e) {
+        figma.notify("Couldn't render the frame PNG.", { error: true });
+        break;
+      }
+      const info = { id: newUUID(), imageScale: 3 };
+      const safeName =
+        (frame.name || "screen").replace(/[^a-zA-Z0-9а-яА-ЯёЁ\s-]/g, "").trim() || "screen";
+      figma.ui.postMessage({
+        type: "save-markup",
+        pngData: Array.from(pngData),
+        controlsJson: JSON.stringify(controls, null, 2),
+        infoJson: JSON.stringify(info, null, 2),
+        folderName: safeName + ".vodesign",
+      });
+      break;
+    }
+
+    case "saved":
+      figma.notify("Exported .vodesign.");
+      break;
+
+    case "get-settings": {
+      const provider = (await figma.clientStorage.getAsync(AI_PROVIDER_KEY)) || "anthropic";
+      figma.ui.postMessage({
+        type: "settings",
+        provider,
+        hasAnthropic: !!(await figma.clientStorage.getAsync(ANTHROPIC_KEY)),
+        hasOpenAI: !!(await figma.clientStorage.getAsync(OPENAI_KEY)),
+      });
+      break;
+    }
+
+    case "save-settings": {
+      if (msg.provider) await figma.clientStorage.setAsync(AI_PROVIDER_KEY, msg.provider);
+      if (typeof msg.anthropicKey === "string" && msg.anthropicKey)
+        await figma.clientStorage.setAsync(ANTHROPIC_KEY, msg.anthropicKey);
+      if (typeof msg.openaiKey === "string" && msg.openaiKey)
+        await figma.clientStorage.setAsync(OPENAI_KEY, msg.openaiKey);
+      if (msg.clearAnthropic) await figma.clientStorage.deleteAsync(ANTHROPIC_KEY);
+      if (msg.clearOpenAI) await figma.clientStorage.deleteAsync(OPENAI_KEY);
+      figma.notify("Settings saved.");
+      figma.ui.postMessage({
+        type: "settings",
+        provider: (await figma.clientStorage.getAsync(AI_PROVIDER_KEY)) || "anthropic",
+        hasAnthropic: !!(await figma.clientStorage.getAsync(ANTHROPIC_KEY)),
+        hasOpenAI: !!(await figma.clientStorage.getAsync(OPENAI_KEY)),
+      });
+      break;
+    }
+
+    case "heuristic-annotate": {
+      const selection = figma.currentPage.selection;
+      if (selection.length === 0) {
+        figma.notify("Select a frame to annotate.");
+        figma.ui.postMessage({ type: "annotate-done" });
+        break;
+      }
+      const frame = topLevelFrameOf(selection[0]);
+      const found = heuristicAnnotations(frame);
+      let created = 0;
+      let skipped = 0;
+      for (const { node, ann } of found) {
+        if (readAnnotation(node)) { skipped++; continue; }
+        try { writeAnnotation(node, ann); created++; } catch (e) {}
+      }
+      await pushSelection();
+      await regeneratePanel(frame, false);
+      figma.ui.postMessage({ type: "annotate-done" });
+      figma.notify(
+        created
+          ? "Suggested " + created + " annotation" + (created === 1 ? "" : "s") +
+              (skipped ? ", kept " + skipped + " existing" : "") + ". Review them in the inspector."
+          : "Couldn't infer any new elements."
+      );
+      break;
+    }
+
+    case "ai-annotate": {
+      const selection = figma.currentPage.selection;
+      if (selection.length === 0) {
+        figma.notify("Select a frame to annotate.");
+        figma.ui.postMessage({ type: "annotate-done" });
+        break;
+      }
+      const frame = topLevelFrameOf(selection[0]);
+      const provider = (await figma.clientStorage.getAsync(AI_PROVIDER_KEY)) || "anthropic";
+      const key = await figma.clientStorage.getAsync(provider === "openai" ? OPENAI_KEY : ANTHROPIC_KEY);
+      if (!key) {
+        figma.notify("Add your " + (provider === "openai" ? "OpenAI" : "Anthropic") + " API key in Settings first.", { error: true });
+        figma.ui.postMessage({ type: "annotate-done", openSettings: true });
+        break;
+      }
+      figma.notify("Generating annotations with AI…");
+      try {
+        const elements = await generateWithAI(provider, key, frame.name, collectFrameData(frame));
+        const { created, skipped } = await applyGenerated(elements);
+        await pushSelection();
+        await regeneratePanel(frame, false);
+        figma.notify(
+          created
+            ? "AI added " + created + " annotation" + (created === 1 ? "" : "s") +
+                (skipped ? ", kept " + skipped + " existing" : "") + "."
+            : "AI returned no new elements."
+        );
+      } catch (e) {
+        figma.notify("AI generation failed: " + (e && e.message ? e.message : "unknown error"), { error: true });
+      }
+      figma.ui.postMessage({ type: "annotate-done" });
+      break;
+    }
 
     case "export": {
       // returns the full reading list as plain data for copy/export in UI
