@@ -57,7 +57,7 @@ function annKind(a) {
 }
 
 function resolveValue(a) {
-  if (a.adjustable && a.enumerated && a.values && a.values.length) {
+  if (a.adjustable && a.values && a.values.length) {
     const idx = Math.min(Math.max(a.selectedIndex || 0, 0), a.values.length - 1);
     return a.values[idx] || "";
   }
@@ -102,7 +102,7 @@ function utteranceParts(a) {
   const tt = a.textTraits || [];
   if (t.indexOf("selected") !== -1) traits.push("Selected");
   if (tt.indexOf("header") !== -1) traits.push("Heading");
-  if (a.adjustable || t.indexOf("adjustable") !== -1) traits.push("Adjustable");
+  if (a.adjustable) traits.push("Adjustable");
   if (t.indexOf("button") !== -1) traits.push("Button");
   if (t.indexOf("switcher") !== -1) traits.push("Switch Button");
   if (t.indexOf("link") !== -1) traits.push("Link");
@@ -205,7 +205,9 @@ function annotatedDescendants(root) {
 function readingOrderSort(a, b) {
   const ba = a.node.absoluteBoundingBox;
   const bb = b.node.absoluteBoundingBox;
-  if (!ba || !bb) return 0;
+  if (!ba && !bb) return 0;
+  if (!ba) return 1; // nodes without a rendered box sort deterministically last
+  if (!bb) return -1;
   const rowThreshold = 8; // px tolerance so items roughly on one line keep L→R order
   if (Math.abs(ba.y - bb.y) > rowThreshold) return ba.y - bb.y;
   return ba.x - bb.x;
@@ -227,9 +229,10 @@ function hierarchicalItems(frame) {
   const itemById = {};
   raw.forEach((x) => (itemById[x.node.id] = x));
   const isContainer = (x) => annKind(x.ann) === "container";
-  // explicit order wins; otherwise fall back to geometry (offset so any
-  // explicitly-ordered item still sorts before purely-geometric ones)
-  const keyOf = (x) => (typeof x.ann.order === "number" ? x.ann.order : 1e6 + geomRank[x.node.id]);
+  // explicit order wins; un-ordered (newly annotated) items fall back to their
+  // geometry rank so they interleave by on-screen position instead of always
+  // sorting after every manually-ordered item.
+  const keyOf = (x) => (typeof x.ann.order === "number" ? x.ann.order : geomRank[x.node.id]);
 
   // nearest annotated-container ancestor within the frame
   const parentOf = {};
@@ -302,7 +305,7 @@ async function frameAnnotationState(frame) {
   try { panel = !!(await getExistingPanel(frame)); } catch (e) {}
   let native = false;
   for (const { node } of hierarchicalItems(frame)) {
-    if ("annotations" in node && Array.isArray(node.annotations) && node.annotations.length) {
+    if ("getPluginData" in node && node.getPluginData(NATIVE_KEY)) {
       native = true;
       break;
     }
@@ -315,7 +318,12 @@ async function pushFrameState(frame) {
   figma.ui.postMessage({ type: "frame-state", panel: s.panel, native: s.native });
 }
 
+// Monotonic token: rapid selection changes run pushSelection concurrently, and
+// a slower earlier call must not post after a newer one and show the wrong node.
+let selectionSeq = 0;
+
 async function pushSelection() {
+  const seq = ++selectionSeq;
   const selection = figma.currentPage.selection;
   if (selection.length === 0) {
     figma.ui.postMessage({ type: "selection", node: null, list: [] });
@@ -339,6 +347,7 @@ async function pushSelection() {
 
   const frame = topLevelFrameOf(node);
   const textParts = innerTextParts(node);
+  if (seq !== selectionSeq) return; // a newer selection superseded this one
   figma.ui.postMessage({
     type: "selection",
     node: {
@@ -353,6 +362,7 @@ async function pushSelection() {
     frame: { id: frame.id, name: frame.name },
     list: buildList(frame),
   });
+  if (seq !== selectionSeq) return;
   await pushFrameState(frame);
 }
 
@@ -380,7 +390,7 @@ const HIGHLIGHT_COLORS = [
 
 function colorForAnnotation(ann) {
   const traits = ann.traits || [];
-  if (ann.adjustable || traits.indexOf("adjustable") !== -1) return HIGHLIGHT_COLORS[2];
+  if (ann.adjustable) return HIGHLIGHT_COLORS[2];
   if (traits.indexOf("button") !== -1 || traits.indexOf("link") !== -1) return HIGHLIGHT_COLORS[1];
   if (traits.indexOf("image") !== -1) return HIGHLIGHT_COLORS[3];
   return HIGHLIGHT_COLORS[0];
@@ -401,8 +411,8 @@ async function drawHighlights() {
 
   await figma.loadFontAsync({ family: "Inter", style: "Semi Bold" });
 
-  // Remove any previous highlight layer for this frame.
-  clearHighlights();
+  // Remove only THIS frame's previous highlight layer (not other frames').
+  clearHighlightsForFrame(frame);
 
   const overlays = [];
   items.forEach((item, index) => {
@@ -434,11 +444,25 @@ async function drawHighlights() {
   if (overlays.length === 0) return;
   const group = figma.group(overlays, frame.parent || figma.currentPage);
   group.name = HIGHLIGHT_LAYER_NAME;
+  group.setPluginData(HIGHLIGHT_FRAME_KEY, frame.id); // scope so redraws only clear this frame
   group.locked = true;
   group.expanded = false;
   figma.notify(`Highlighted ${items.length} annotated element${items.length === 1 ? "" : "s"}.`);
 }
 
+const HIGHLIGHT_FRAME_KEY = "a11yHlFrame";
+
+// Remove only the highlight group belonging to a specific frame.
+function clearHighlightsForFrame(frame) {
+  const existing = figma.currentPage.findAll(
+    (n) =>
+      n.type === "GROUP" && n.name === HIGHLIGHT_LAYER_NAME &&
+      "getPluginData" in n && n.getPluginData(HIGHLIGHT_FRAME_KEY) === frame.id
+  );
+  for (const layer of existing) layer.remove();
+}
+
+// Remove every highlight group on the page (the explicit "Clear" action).
 function clearHighlights() {
   const existing = figma.currentPage.findAll(
     (n) => n.name === HIGHLIGHT_LAYER_NAME && n.type === "GROUP"
@@ -590,8 +614,12 @@ async function regeneratePanel(frame, forceCreate) {
 // ---------------------------------------------------------------------------
 
 // this plugin's string trait keys -> VoiceOver Designer numeric trait bitmask
+// Switch Button lives at bit 53 (2^53) — beyond JS 32-bit bitwise ops, so trait
+// bitmasks are combined by ADDITION (distinct powers of two) and this high bit
+// is read arithmetically.
+const SWITCH_TRAIT = 9007199254740992; // 2^53
 const TRAIT_BITS = {
-  button: 1, header: 2, adjustable: 4, switcher: 4, link: 8, selected: 16,
+  button: 1, header: 2, adjustable: 4, switcher: SWITCH_TRAIT, link: 8, selected: 16,
   image: 32, staticText: 64, summaryElement: 128, updatesFrequently: 256,
   playsSound: 512, startsMediaSession: 1024, allowsDirectInteraction: 2048,
   causesPageTurn: 4096, textInput: 8192, isEditing: 16384, searchField: 32768,
@@ -600,10 +628,14 @@ const TRAIT_BITS = {
 
 function traitsToBitmask(a) {
   let bits = 0;
-  const add = (k) => { if (TRAIT_BITS[k]) bits |= TRAIT_BITS[k]; };
+  const added = {};
+  const add = (k) => {
+    const v = TRAIT_BITS[k];
+    if (v && !added[v]) { bits += v; added[v] = 1; } // add, not |=, so bit 53 survives
+  };
   (a.traits || []).forEach(add);
   (a.textTraits || []).forEach(add);
-  if (a.adjustable) bits |= TRAIT_BITS.adjustable;
+  if (a.adjustable) add("adjustable");
   return bits;
 }
 
@@ -630,6 +662,13 @@ function buildControls(frame) {
       const w = b ? Math.round(b.width) : 0;
       const h = b ? Math.round(b.height) : 0;
       const enumerated = !!(ann.adjustable && ann.enumerated);
+      const options = enumerated ? (ann.values || []).slice() : [];
+      const currentIndex = options.length
+        ? Math.min(Math.max(ann.selectedIndex || 0, 0), options.length - 1)
+        : 0;
+      const descriptions = getDescriptions(ann)
+        .map((d) => ({ label: (d.label || "").trim(), value: (d.value || "").trim() }))
+        .filter((d) => d.label || d.value);
       return {
         hint: (ann.hint || "").trim(),
         id: newUUID(),
@@ -638,11 +677,12 @@ function buildControls(frame) {
           names: (ann.customActions || []).map((s) => (s || "").trim()).filter(Boolean),
         },
         isAccessibilityElement: true,
-        customDescriptions: { descriptions: [] },
+        customDescriptions: { descriptions: descriptions },
         label: (ann.label || "").trim(),
         adjustableOptions: {
-          options: enumerated ? (ann.values || []).slice() : [],
+          options: options,
           isEnumerated: !!ann.enumerated,
+          currentIndex: currentIndex,
         },
         value: resolveValue(ann),
         trait: traitsToBitmask(ann),
@@ -654,22 +694,26 @@ function buildControls(frame) {
 // Native Figma annotations (shown in Dev Mode)
 // ---------------------------------------------------------------------------
 
-// Find the built-in "Accessibility" annotation category, else the first one.
+// pluginData marker storing the exact native-annotation label this plugin
+// wrote on a node, so we can update/remove only our own — never the user's.
+const NATIVE_KEY = "a11yNativeLabel";
+
+// Find the built-in "Accessibility" annotation category. Returns undefined
+// (no category) rather than guessing a wrong one when none matches.
 async function accessibilityCategoryId() {
   if (!figma.annotations || !figma.annotations.getAnnotationCategoriesAsync) return undefined;
   try {
     const cats = await figma.annotations.getAnnotationCategoriesAsync();
     const a11y = cats.find((c) => /accessib/i.test(c.label || ""));
-    const chosen = a11y || cats[0];
-    return chosen ? chosen.id : undefined;
+    return a11y ? a11y.id : undefined;
   } catch (e) {
     return undefined;
   }
 }
 
 // Write each annotated element/container's utterance as a native Figma
-// annotation on its node (visible in Dev Mode). Replaces the node's existing
-// annotations so re-running stays idempotent.
+// annotation (visible in Dev Mode), preserving any annotations the plugin
+// didn't create and replacing only its own previous one (idempotent).
 async function syncNativeAnnotations(frame) {
   const categoryId = await accessibilityCategoryId();
   let count = 0;
@@ -679,12 +723,31 @@ async function syncNativeAnnotations(frame) {
     if (!u || !u.text) continue;
     const subs = subLinesOf(ann);
     const label = u.text + subs.map((s) => "\n• " + s).join("");
+    const prev = "getPluginData" in node ? node.getPluginData(NATIVE_KEY) : "";
+    const others = (node.annotations || []).filter((a) => !(prev && a.label === prev));
     try {
-      node.annotations = [categoryId ? { label, categoryId } : { label }];
+      node.annotations = others.concat([categoryId ? { label, categoryId } : { label }]);
+      if ("setPluginData" in node) node.setPluginData(NATIVE_KEY, label);
       count++;
     } catch (e) {}
   }
   return count;
+}
+
+// Remove only the native annotations this plugin created for the frame.
+function removeNativeAnnotations(frame) {
+  let removed = 0;
+  for (const { node } of hierarchicalItems(frame)) {
+    if (!("annotations" in node) || !("getPluginData" in node)) continue;
+    const prev = node.getPluginData(NATIVE_KEY);
+    if (!prev) continue;
+    const kept = (node.annotations || []).filter((a) => a.label !== prev);
+    if (kept.length !== (node.annotations || []).length) {
+      try { node.annotations = kept; removed++; } catch (e) {}
+    }
+    node.setPluginData(NATIVE_KEY, "");
+  }
+  return removed;
 }
 
 // ---------------------------------------------------------------------------
@@ -696,7 +759,8 @@ function bitmaskToAnn(trait) {
   trait = trait || 0;
   const traits = [];
   const textTraits = [];
-  const has = (bit) => (trait & bit) !== 0;
+  const low = trait % SWITCH_TRAIT; // 32-bit-safe portion (all defined low bits < 2^18)
+  const has = (bit) => (low & bit) !== 0;
   if (has(1)) traits.push("button");
   if (has(8)) traits.push("link");
   if (has(16)) traits.push("selected");
@@ -708,6 +772,7 @@ function bitmaskToAnn(trait) {
   if (has(2048)) traits.push("allowsDirectInteraction");
   if (has(4096)) traits.push("causesPageTurn");
   if (has(131072)) traits.push("disabled");
+  if (Math.floor(trait / SWITCH_TRAIT) % 2 === 1) traits.push("switcher");
   if (has(2)) textTraits.push("header");
   if (has(64)) textTraits.push("staticText");
   if (has(8192)) textTraits.push("textInput");
@@ -718,12 +783,12 @@ function bitmaskToAnn(trait) {
 }
 
 // Local, name-based fallback analyzer. Returns [{ node, ann }] in our model.
+// Defaults to static text (not button) when nothing signals interactivity.
 function guessTraits(name, type) {
   if (/header|title|заголовок|название/.test(name)) return { traits: [], textTraits: ["header"] };
   if (/tab/.test(name)) return { traits: ["button", "causesPageTurn"], textTraits: [] };
   if (/button|btn|back|cell|ячейка|кнопка|item|элемент/.test(name)) return { traits: ["button"], textTraits: [] };
-  if (type === "TEXT") return { traits: [], textTraits: ["staticText"] };
-  return { traits: ["button"], textTraits: [] };
+  return { traits: [], textTraits: ["staticText"] };
 }
 
 function heuristicAnnotations(frame) {
@@ -732,14 +797,17 @@ function heuristicAnnotations(frame) {
     if (n.visible === false) return;
     const name = (n.name || "").toLowerCase();
     if (name.includes("status bar")) return;
-    const include =
-      /cell|button|btn|tab|header|title|ячейка|кнопка|заголовок/.test(name) ||
-      n.type === "TEXT" || n.type === "INSTANCE";
-    const decorative =
+    const interactiveName = /cell|button|btn|tab|header|title|back|ячейка|кнопка|заголовок/.test(name);
+    const parts = innerTextParts(n);
+    const box = n.absoluteBoundingBox;
+    const small = !!(box && box.width <= 48 && box.height <= 48);
+    const include = interactiveName || n.type === "TEXT" || n.type === "INSTANCE";
+    let decorative =
       /background|container|wrapper/.test(name) ||
       (name.includes("icon") && !name.includes("button"));
+    // an unlabeled, small instance is almost certainly decorative (icon/avatar/chevron)
+    if (n.type === "INSTANCE" && !interactiveName && parts.length === 0 && small) decorative = true;
     if (include && !decorative) {
-      const parts = innerTextParts(n);
       const t = guessTraits(name, n.type);
       out.push({
         node: n,
@@ -812,13 +880,13 @@ const AI_SKILL =
   "Structure every element as label -> value -> trait:\n" +
   '- label: the name / main content the user scans for. Keep it short. NEVER put the element type ("button", "cell", "image") in the label — the trait already says it.\n' +
   '- value: secondary or additional content, or the current state (e.g. "On", "3 of 5"). Empty if there is none.\n' +
-  "- trait: the role/state as a bitmask, summed: button 1, header 2, adjustable/switch 4, link 8, selected 16, image 32, static text 64, updates frequently 256, text input 8192, is editing 16384, search field 32768, disabled 131072. Combine, e.g. selected button = 17.\n" +
+  "- trait: the role/state as a bitmask, summed: button 1, header 2, adjustable 4, link 8, selected 16, image 32, static text 64, updates frequently 256, text input 8192, is editing 16384, search field 32768, disabled 131072, switch button 9007199254740992. Combine by summing, e.g. selected button = 17.\n" +
   "- hint: what happens on activation (optional, starts with a verb).\n\n" +
   "Rules:\n" +
   "- One accessibility element per meaningful control. Collapse a cell/row into ONE element (label = title, value = subtitle/detail).\n" +
   "- Interactive layers (buttons, cells, tabs, links) set the button/link bit.\n" +
   "- Headings and section titles set the header bit (2).\n" +
-  "- Adjustable controls (segmented, stepper, slider, switch) set bit 4; put the choices in options and set isEnumerated true.\n" +
+  "- Adjustable controls (segmented, stepper, slider) set bit 4 with the choices in options and isEnumerated true. A switch/toggle uses the switch-button trait (9007199254740992).\n" +
   "- Hide decorative layers (icons, avatars, chevrons, backgrounds) — do NOT emit them.\n" +
   "- Skip the status bar.";
 
@@ -833,20 +901,68 @@ function buildAIPrompt(frameName, frameData) {
   );
 }
 
+// JSON Schema for structured output (guarantees parseable results).
+const AI_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["elements"],
+  properties: {
+    elements: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["nodeId", "label", "value", "hint", "trait", "options", "isEnumerated", "actions"],
+        properties: {
+          nodeId: { type: "string" },
+          label: { type: "string" },
+          value: { type: "string" },
+          hint: { type: "string" },
+          trait: { type: "integer" },
+          options: { type: "array", items: { type: "string" } },
+          isEnumerated: { type: "boolean" },
+          actions: { type: "array", items: { type: "string" } },
+        },
+      },
+    },
+  },
+};
+
+function fetchWithTimeout(url, options, ms) {
+  return Promise.race([
+    fetch(url, options),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out")), ms)),
+  ]);
+}
+
+// One retry on rate-limit / overload, honouring Retry-After.
+async function apiFetch(url, options) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetchWithTimeout(url, options, 120000);
+    if (res.ok || attempt >= 1 || [429, 503, 529].indexOf(res.status) === -1) return res;
+    const ra = parseInt(res.headers.get("retry-after") || "", 10);
+    await new Promise((r) => setTimeout(r, (ra > 0 ? ra : 3) * 1000));
+  }
+}
+
 // Calls the selected provider and returns the parsed elements array.
 async function generateWithAI(provider, key, frameName, frameData) {
   const prompt = buildAIPrompt(frameName, frameData);
   let content;
   if (provider === "openai") {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const res = await apiFetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
       body: JSON.stringify({
         model: "gpt-4o",
         temperature: 0.2,
-        response_format: { type: "json_object" },
+        max_tokens: 16000,
+        response_format: {
+          type: "json_schema",
+          json_schema: { name: "voiceover_annotations", strict: true, schema: AI_SCHEMA },
+        },
         messages: [
-          { role: "system", content: "You output only valid JSON." },
+          { role: "system", content: "You output only valid JSON matching the schema." },
           { role: "user", content: prompt },
         ],
       }),
@@ -856,9 +972,13 @@ async function generateWithAI(provider, key, frameName, frameData) {
       throw new Error((e.error && e.error.message) || "OpenAI HTTP " + res.status);
     }
     const data = await res.json();
-    content = data.choices[0].message.content;
+    const choice = (data.choices || [])[0];
+    if (choice && choice.finish_reason === "length") {
+      throw new Error("The frame is too large for one request — try a smaller selection.");
+    }
+    content = choice && choice.message ? choice.message.content : "";
   } else {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
+    const res = await apiFetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -868,8 +988,9 @@ async function generateWithAI(provider, key, frameName, frameData) {
       },
       body: JSON.stringify({
         model: "claude-opus-4-8",
-        max_tokens: 8000,
-        system: "You output only valid JSON.",
+        max_tokens: 16000,
+        system: "You output only valid JSON matching the schema.",
+        output_config: { format: { type: "json_schema", schema: AI_SCHEMA } },
         messages: [{ role: "user", content: prompt }],
       }),
     });
@@ -878,6 +999,9 @@ async function generateWithAI(provider, key, frameName, frameData) {
       throw new Error((e.error && e.error.message) || "Anthropic HTTP " + res.status);
     }
     const data = await res.json();
+    if (data.stop_reason === "max_tokens") {
+      throw new Error("The frame is too large for one request — try a smaller selection.");
+    }
     content = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("");
   }
   content = (content || "").trim();
@@ -892,10 +1016,11 @@ async function generateWithAI(provider, key, frameName, frameData) {
 async function applyGenerated(elements) {
   let created = 0;
   let skipped = 0;
+  let unmatched = 0; // results whose nodeId didn't resolve to an annotatable layer
   for (const el of elements) {
-    if (!el || !el.nodeId) continue;
+    if (!el || !el.nodeId) { unmatched++; continue; }
     const node = await figma.getNodeByIdAsync(el.nodeId);
-    if (!node || node.removed || !("setPluginData" in node)) continue;
+    if (!node || node.removed || !("setPluginData" in node)) { unmatched++; continue; }
     if (readAnnotation(node)) { skipped++; continue; } // keep existing manual work
     const m = bitmaskToAnn(el.trait || 0);
     const options = Array.isArray(el.options) ? el.options : [];
@@ -917,7 +1042,7 @@ async function applyGenerated(elements) {
       created++;
     } catch (e) {}
   }
-  return { created, skipped };
+  return { created, skipped, unmatched };
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,12 +1152,7 @@ figma.ui.onmessage = async (msg) => {
       const frame = topLevelFrameOf(selection[0]);
       const state = await frameAnnotationState(frame);
       if (state.native) {
-        let removed = 0;
-        for (const { node } of hierarchicalItems(frame)) {
-          if ("annotations" in node && Array.isArray(node.annotations) && node.annotations.length) {
-            try { node.annotations = []; removed++; } catch (e) {}
-          }
-        }
+        const removed = removeNativeAnnotations(frame);
         figma.notify("Removed Figma annotations from " + removed + " element" + (removed === 1 ? "" : "s") + ".");
       } else {
         let n;
@@ -1093,7 +1213,11 @@ figma.ui.onmessage = async (msg) => {
     }
 
     case "saved":
-      figma.notify("Exported .vodesign.");
+      figma.notify("Downloaded the preview (.vodesign).");
+      break;
+
+    case "save-failed":
+      figma.notify("Couldn't save the preview.", { error: true });
       break;
 
     case "open-url":
@@ -1174,25 +1298,19 @@ figma.ui.onmessage = async (msg) => {
       figma.notify("Generating annotations with AI…");
       try {
         const elements = await generateWithAI(provider, key, frame.name, collectFrameData(frame));
-        const { created, skipped } = await applyGenerated(elements);
+        const { created, skipped, unmatched } = await applyGenerated(elements);
         await pushSelection();
         await regeneratePanel(frame, false);
-        figma.notify(
-          created
-            ? "AI added " + created + " annotation" + (created === 1 ? "" : "s") +
-                (skipped ? ", kept " + skipped + " existing" : "") + "."
-            : "AI returned no new elements."
-        );
+        let m = created
+          ? "AI added " + created + " annotation" + (created === 1 ? "" : "s")
+          : "AI returned no new elements";
+        if (skipped) m += ", kept " + skipped + " existing";
+        if (unmatched) m += ", " + unmatched + " didn’t match a layer";
+        figma.notify(m + ".");
       } catch (e) {
         figma.notify("AI generation failed: " + (e && e.message ? e.message : "unknown error"), { error: true });
       }
       figma.ui.postMessage({ type: "annotate-done" });
-      break;
-    }
-
-    case "export": {
-      // returns the full reading list as plain data for copy/export in UI
-      await pushList();
       break;
     }
   }

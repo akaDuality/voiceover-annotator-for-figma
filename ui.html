@@ -315,26 +315,28 @@
               <input type="text" id="label" placeholder="What the element is, e.g. “Size”" autocomplete="off" />
             </label>
             <div id="value-section">
-            <label class="field">
-              <span class="field-label">Value</span>
-              <textarea id="value" rows="2" placeholder="Current value, e.g. “Medium”" autocomplete="off"></textarea>
-            </label>
-            <label class="check">
-              <input type="checkbox" id="adjustable" />
-              <span>Adjustable (user can change the value)</span>
-            </label>
-
-            <div id="enum-block" class="hidden" style="margin-top:8px;">
-              <div class="row between" style="margin-bottom:6px;">
-                <span class="field-label" style="margin:0;">Enumerated values</span>
+              <div class="row between" style="margin-bottom:4px;">
+                <span class="field-label" style="margin:0;">Value</span>
                 <label class="check" style="font-weight:500;">
-                  <input type="checkbox" id="enumerated" />
-                  <span>Enumerated</span>
+                  <input type="checkbox" id="adjustable" />
+                  <span>Adjustable</span>
                 </label>
               </div>
-              <div id="values-list"></div>
-              <button class="btn" id="add-value" style="margin-top:4px;">+ Add value</button>
-            </div>
+
+              <!-- single value shown when NOT adjustable -->
+              <textarea id="value" rows="2" placeholder="Current value, e.g. “Medium”" autocomplete="off"></textarea>
+
+              <!-- switcher between the adjustable's values, shown when adjustable -->
+              <div id="enum-block" class="hidden">
+                <div id="values-list"></div>
+                <div class="row between" style="margin-top:4px;">
+                  <button class="btn" id="add-value">+ Add value</button>
+                  <label class="check" style="font-weight:500;">
+                    <input type="checkbox" id="enumerated" />
+                    <span>Enumerated</span>
+                  </label>
+                </div>
+              </div>
             </div><!-- /value-section -->
           </div>
 
@@ -430,7 +432,10 @@
       Keys are stored only on your machine via <code>figma.clientStorage</code> — they never travel with the file
       and are sent solely to the provider you select. Leave a field blank to keep the saved key.
     </span>
-    <button class="btn primary full" id="save-settings" style="margin-top:4px;">Save</button>
+    <div class="row" style="gap:8px; margin-top:4px;">
+      <button class="btn primary" id="save-settings" style="flex:1;">Save</button>
+      <button class="btn" id="clear-key" style="flex:0 0 auto;">Remove saved key</button>
+    </div>
   </div>
 
   <!-- resize grip -->
@@ -515,7 +520,7 @@ function annKind(a) {
 // VoiceOver utterance generation
 // ===========================================================================
 function resolveValue(a) {
-  if (a.adjustable && a.enumerated && a.values && a.values.length) {
+  if (a.adjustable && a.values && a.values.length) {
     const idx = Math.min(Math.max(a.selectedIndex || 0, 0), a.values.length - 1);
     return a.values[idx] || "";
   }
@@ -567,7 +572,7 @@ function utteranceParts(a) {
   const tt = a.textTraits || [];
   if (t.indexOf("selected") !== -1) traits.push("Selected");
   if (tt.indexOf("header") !== -1) traits.push("Heading");
-  if (a.adjustable || t.indexOf("adjustable") !== -1) traits.push("Adjustable");
+  if (a.adjustable) traits.push("Adjustable");
   if (t.indexOf("button") !== -1) traits.push("Button");
   if (t.indexOf("switcher") !== -1) traits.push("Switch Button");
   if (t.indexOf("link") !== -1) traits.push("Link");
@@ -679,7 +684,7 @@ function renderForm() {
     el.checked = (ann.textTraits || []).indexOf(el.dataset.key) !== -1;
   });
 
-  document.getElementById("enum-block").classList.toggle("hidden", !ann.adjustable);
+  updateValueMode();
   renderValues();
   renderActions();
   renderDescriptions();
@@ -725,6 +730,8 @@ function renderValues() {
     del.title = "Remove value";
     del.addEventListener("click", () => {
       ann.values.splice(i, 1);
+      // keep the same value selected: shift the index when deleting above it
+      if (i < ann.selectedIndex) ann.selectedIndex--;
       if (ann.selectedIndex >= ann.values.length) ann.selectedIndex = Math.max(0, ann.values.length - 1);
       renderValues(); onChange();
     });
@@ -818,13 +825,29 @@ function save() {
   parent.postMessage({ pluginMessage: { type: "save", id: currentId, annotation: ann } }, "*");
 }
 
+// Adjustable off -> single Value field; on -> the values switcher (radio list).
+function updateValueMode() {
+  const adj = !!ann.adjustable;
+  document.getElementById("value").classList.toggle("hidden", adj);
+  document.getElementById("enum-block").classList.toggle("hidden", !adj);
+}
+
 // wire simple text inputs
 function bind(id, prop, isCheckbox) {
   const el = document.getElementById(id);
   el.addEventListener(isCheckbox ? "change" : "input", () => {
     ann[prop] = isCheckbox ? el.checked : el.value;
     if (id === "adjustable") {
-      document.getElementById("enum-block").classList.toggle("hidden", !ann.adjustable);
+      // seed the single value as the first option when turning adjustable on
+      if (ann.adjustable) {
+        const v = (ann.value || "").trim();
+        if (v && (!ann.values || ann.values.length === 0)) {
+          ann.values = [v];
+          ann.selectedIndex = 0;
+        }
+        renderValues();
+      }
+      updateValueMode();
     }
     onChange();
   });
@@ -1078,6 +1101,15 @@ document.getElementById("save-settings").addEventListener("click", () => {
   anthInput.value = "";
   oaInput.value = "";
 });
+document.getElementById("clear-key").addEventListener("click", () => {
+  const p = document.getElementById("ai-provider").value;
+  parent.postMessage({ pluginMessage: {
+    type: "save-settings",
+    provider: p,
+    clearAnthropic: p === "anthropic",
+    clearOpenAI: p === "openai",
+  } }, "*");
+});
 
 // ===========================================================================
 // Messages from the plugin
@@ -1087,6 +1119,8 @@ onmessage = (event) => {
   if (!msg) return;
 
   if (msg.type === "selection") {
+    // flush any pending edit for the previously-selected node before switching
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; save(); }
     if (!msg.node) {
       currentId = null;
       suggest = { label: "", value: "" };
@@ -1149,12 +1183,24 @@ function resetExportButton() {
   btn.textContent = "Download preview";
 }
 
+function finishExport(ok) {
+  resetExportButton();
+  parent.postMessage({ pluginMessage: { type: ok ? "saved" : "save-failed" } }, "*");
+}
+
 async function saveMarkup(msg) {
-  try {
-    // Preferred path: write the folder directly via File System Access API.
-    if (window.showDirectoryPicker) {
+  // Preferred path: write the folder directly via File System Access API.
+  if (window.showDirectoryPicker) {
+    let dirHandle = null;
+    try {
+      dirHandle = await window.showDirectoryPicker();
+    } catch (pickErr) {
+      // user cancelled → stop; API blocked/unsupported → fall through to ZIP
+      if (pickErr && pickErr.name === "AbortError") { resetExportButton(); return; }
+    }
+    if (dirHandle) {
+      // A directory was chosen: commit to this path (don't also emit a ZIP).
       try {
-        const dirHandle = await window.showDirectoryPicker();
         let folderHandle;
         try {
           folderHandle = await dirHandle.getDirectoryHandle(msg.folderName, { create: true });
@@ -1165,16 +1211,16 @@ async function saveMarkup(msg) {
         await writeFile(folderHandle, "controls.json", msg.controlsJson);
         await writeFile(folderHandle, "info.json", msg.infoJson);
         await writeFile(folderHandle, "screen.png", new Blob([new Uint8Array(msg.pngData)], { type: "image/png" }));
-        resetExportButton();
-        parent.postMessage({ pluginMessage: { type: "saved" } }, "*");
-        return;
-      } catch (fsError) {
-        // user cancelled the picker, or the API failed — fall through to ZIP
-        if (fsError && fsError.name === "AbortError") { resetExportButton(); return; }
+        finishExport(true);
+      } catch (writeErr) {
+        finishExport(false);
       }
+      return;
     }
+  }
 
-    // Fallback: build a stored (uncompressed) ZIP with the folder inside.
+  // Fallback: build a stored (uncompressed) ZIP with the folder inside.
+  try {
     const enc = new TextEncoder();
     const entries = [
       makeZipEntry(msg.folderName + "/controls.json", enc.encode(msg.controlsJson)),
@@ -1182,11 +1228,9 @@ async function saveMarkup(msg) {
       makeZipEntry(msg.folderName + "/screen.png", new Uint8Array(msg.pngData)),
     ];
     downloadBlob(buildZip(entries), msg.folderName + ".zip");
-    resetExportButton();
-    parent.postMessage({ pluginMessage: { type: "saved" } }, "*");
-  } catch (error) {
-    resetExportButton();
-    parent.postMessage({ pluginMessage: { type: "saved" } }, "*");
+    finishExport(true);
+  } catch (zipErr) {
+    finishExport(false);
   }
 }
 
