@@ -4,7 +4,7 @@
 const PLUGIN_DATA_KEY = "a11y";
 const HIGHLIGHT_LAYER_NAME = "♿︎ VoiceOver Annotations";
 
-figma.showUI(__html__, { width: 380, height: 720, themeColors: true });
+figma.showUI(__html__, { width: 380, height: 900, themeColors: true });
 
 const SIZE_KEY = "a11y-window-size";
 const MIN_W = 320;
@@ -294,10 +294,32 @@ function buildList(frame) {
 // Sync helpers — push current state to the UI
 // ---------------------------------------------------------------------------
 
+// Which annotation outputs already exist for a frame (drives button "on" state):
+//  panel  — a description panel next to the frame ("Below frame")
+//  native — native Figma annotations present on any element ("Dev Mode")
+async function frameAnnotationState(frame) {
+  let panel = false;
+  try { panel = !!(await getExistingPanel(frame)); } catch (e) {}
+  let native = false;
+  for (const { node } of hierarchicalItems(frame)) {
+    if ("annotations" in node && Array.isArray(node.annotations) && node.annotations.length) {
+      native = true;
+      break;
+    }
+  }
+  return { panel, native };
+}
+
+async function pushFrameState(frame) {
+  const s = frame ? await frameAnnotationState(frame) : { panel: false, native: false };
+  figma.ui.postMessage({ type: "frame-state", panel: s.panel, native: s.native });
+}
+
 async function pushSelection() {
   const selection = figma.currentPage.selection;
   if (selection.length === 0) {
     figma.ui.postMessage({ type: "selection", node: null, list: [] });
+    figma.ui.postMessage({ type: "frame-state", panel: false, native: false });
     return;
   }
   let node = selection[0];
@@ -331,6 +353,7 @@ async function pushSelection() {
     frame: { id: frame.id, name: frame.name },
     list: buildList(frame),
   });
+  await pushFrameState(frame);
 }
 
 async function pushList() {
@@ -341,6 +364,7 @@ async function pushList() {
   }
   const frame = topLevelFrameOf(selection[0]);
   figma.ui.postMessage({ type: "list", list: buildList(frame) });
+  await pushFrameState(frame);
 }
 
 // ---------------------------------------------------------------------------
@@ -981,8 +1005,16 @@ figma.ui.onmessage = async (msg) => {
         break;
       }
       const frame = topLevelFrameOf(selection[0]);
-      const ok = await regeneratePanel(frame, true);
-      if (ok) figma.notify("Built the VoiceOver description next to “" + frame.name + "”.");
+      const existing = await getExistingPanel(frame);
+      if (existing) {
+        existing.remove();
+        frame.setPluginData(PANEL_KEY, "");
+        figma.notify("Removed the description panel.");
+      } else {
+        const ok = await regeneratePanel(frame, true);
+        if (ok) figma.notify("Built the VoiceOver description next to “" + frame.name + "”.");
+      }
+      await pushFrameState(frame);
       break;
     }
 
@@ -993,17 +1025,29 @@ figma.ui.onmessage = async (msg) => {
         break;
       }
       const frame = topLevelFrameOf(selection[0]);
-      let n;
-      try {
-        n = await syncNativeAnnotations(frame);
-      } catch (e) {
-        figma.notify("Couldn't add Figma annotations here.", { error: true });
-        break;
+      const state = await frameAnnotationState(frame);
+      if (state.native) {
+        let removed = 0;
+        for (const { node } of hierarchicalItems(frame)) {
+          if ("annotations" in node && Array.isArray(node.annotations) && node.annotations.length) {
+            try { node.annotations = []; removed++; } catch (e) {}
+          }
+        }
+        figma.notify("Removed Figma annotations from " + removed + " element" + (removed === 1 ? "" : "s") + ".");
+      } else {
+        let n;
+        try {
+          n = await syncNativeAnnotations(frame);
+        } catch (e) {
+          figma.notify("Couldn't add Figma annotations here.", { error: true });
+          break;
+        }
+        figma.notify(
+          n ? "Added " + n + " Figma annotation" + (n === 1 ? "" : "s") + " — open Dev Mode to see them."
+            : "No annotated elements to mark."
+        );
       }
-      figma.notify(
-        n ? "Added " + n + " Figma annotation" + (n === 1 ? "" : "s") + " — open Dev Mode to see them."
-          : "No annotated elements to mark."
-      );
+      await pushFrameState(frame);
       break;
     }
 
@@ -1050,6 +1094,10 @@ figma.ui.onmessage = async (msg) => {
 
     case "saved":
       figma.notify("Exported .vodesign.");
+      break;
+
+    case "open-url":
+      if (msg.url) figma.openExternal(msg.url);
       break;
 
     case "get-settings": {
