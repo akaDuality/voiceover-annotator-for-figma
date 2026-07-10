@@ -59,6 +59,23 @@ function resolveValue(a) {
   return (a.value || "").trim();
 }
 
+// custom descriptions are { label, value } pairs; migrate the old single string
+function getDescriptions(a) {
+  if (Array.isArray(a.customDescriptions)) return a.customDescriptions;
+  if (a.customDescription && a.customDescription.trim()) {
+    return [{ label: "", value: a.customDescription }];
+  }
+  return [];
+}
+
+// spoken form of one custom description: "value, label"
+function descText(d) {
+  const v = (d.value || "").trim();
+  const l = (d.label || "").trim();
+  if (v && l) return v + ", " + l;
+  return v || l;
+}
+
 function utteranceParts(a) {
   if (!a) return null;
   const kind = annKind(a);
@@ -67,9 +84,6 @@ function utteranceParts(a) {
     const label = (a.label || "").trim();
     if (!label) return null;
     return { main: label, traits: [], hint: "", container: true };
-  }
-  if (a.customDescription && a.customDescription.trim()) {
-    return { main: a.customDescription.trim(), traits: [], hint: (a.hint || "").trim() };
   }
   const label = (a.label || "").trim();
   const value = resolveValue(a);
@@ -92,6 +106,16 @@ function utteranceParts(a) {
   if (tt.indexOf("textInput") !== -1) traits.push("Text Field");
   if (t.indexOf("disabled") !== -1) traits.push("Dimmed");
   return { main, traits, hint: (a.hint || "").trim() };
+}
+
+// Custom descriptions ("value, label") and custom actions, shown as indented
+// sub-lines beneath the element. Elements only (not containers/ignored).
+function subLinesOf(a) {
+  if (annKind(a) !== "element") return [];
+  const out = [];
+  getDescriptions(a).map(descText).filter(Boolean).forEach((s) => out.push(s));
+  (a.customActions || []).map((s) => (s || "").trim()).filter(Boolean).forEach((s) => out.push(s));
+  return out;
 }
 
 // returns { text, traitRanges:[{start,end}], hintRange } with char offsets
@@ -139,6 +163,24 @@ function topLevelFrameOf(node) {
     current = current.parent;
   }
   return candidate || node;
+}
+
+// Collect the text of every visible descendant TEXT layer, in reading order.
+// Used to suggest a Label (first text layer) and Value (the rest, combined).
+function innerTextParts(node) {
+  const parts = [];
+  const visit = (n) => {
+    if (n.visible === false) return;
+    if (n.type === "TEXT" && typeof n.characters === "string") {
+      const t = n.characters.replace(/\s+/g, " ").trim();
+      if (t) parts.push(t);
+    }
+    if ("children" in n) {
+      for (const child of n.children) visit(child);
+    }
+  };
+  visit(node);
+  return parts;
 }
 
 function annotatedDescendants(root) {
@@ -269,6 +311,7 @@ async function pushSelection() {
   }
 
   const frame = topLevelFrameOf(node);
+  const textParts = innerTextParts(node);
   figma.ui.postMessage({
     type: "selection",
     node: {
@@ -276,6 +319,9 @@ async function pushSelection() {
       name: node.name,
       type: node.type,
       ann: readAnnotation(node),
+      // Label ← first text layer; Value ← the remaining text layers combined.
+      labelText: textParts[0] || "",
+      valueText: textParts.slice(1).join(" "),
     },
     frame: { id: frame.id, name: frame.name },
     list: buildList(frame),
@@ -405,6 +451,7 @@ async function regeneratePanel(frame, forceCreate) {
       name: x.node.name,
       depth: x.depth,
       u: buildUtterance(x.ann),
+      sublines: subLinesOf(x.ann),
     }))
     .filter((x) => x.u && x.u.text);
 
@@ -435,7 +482,7 @@ async function regeneratePanel(frame, forceCreate) {
   panel.primaryAxisSizingMode = "AUTO";
   panel.counterAxisSizingMode = "FIXED";
   panel.resize(Math.max(frame.width, 200), 100); // match the frame's width
-  panel.itemSpacing = 10;
+  panel.itemSpacing = 7;
   panel.paddingTop = 24;
   panel.paddingBottom = 24;
   panel.paddingLeft = 24;
@@ -454,25 +501,22 @@ async function regeneratePanel(frame, forceCreate) {
   title.layoutSizingHorizontal = "FILL"; // fill panel width (after it's in the layout)
   title.textAutoResize = "HEIGHT";
 
-  items.forEach((item) => {
-    const u = item.u;
-    const isContainer = u.container;
-
+  const appendLine = (opts) => {
     const t = figma.createText();
-    t.fontName = { family: "Inter", style: isContainer ? "Semi Bold" : "Regular" };
-    t.fontSize = isContainer ? 15 : 14;
+    t.fontName = { family: "Inter", style: opts.container ? "Semi Bold" : "Regular" };
+    t.fontSize = opts.container ? 15 : opts.sub ? 13 : 14;
     t.lineHeight = { value: 150, unit: "PERCENT" };
-    t.characters = u.text;
-    t.fills = [{ type: "SOLID", color: COL.text }];
-    for (const r of u.traitRanges) {
+    t.characters = opts.text;
+    t.fills = [{ type: "SOLID", color: opts.sub ? COL.hint : COL.text }];
+    for (const r of opts.traitRanges || []) {
       t.setRangeFontName(r.start, r.end, { family: "Inter", style: "Medium" });
       t.setRangeFills(r.start, r.end, [{ type: "SOLID", color: COL.trait }]);
     }
-    if (u.hintRange) {
-      t.setRangeFills(u.hintRange.start, u.hintRange.end, [{ type: "SOLID", color: COL.hint }]);
+    if (opts.hintRange) {
+      t.setRangeFills(opts.hintRange.start, opts.hintRange.end, [{ type: "SOLID", color: COL.hint }]);
     }
 
-    if (item.depth > 0) {
+    if (opts.depth > 0) {
       // wrap in a transparent auto-layout frame to indent the whole block
       const rowFrame = figma.createFrame();
       rowFrame.name = "row";
@@ -480,7 +524,7 @@ async function regeneratePanel(frame, forceCreate) {
       rowFrame.layoutMode = "HORIZONTAL";
       rowFrame.counterAxisSizingMode = "AUTO";
       rowFrame.fills = [];
-      rowFrame.paddingLeft = item.depth * 20;
+      rowFrame.paddingLeft = opts.depth * 20;
       rowFrame.layoutSizingHorizontal = "FILL";
       rowFrame.appendChild(t);
       t.layoutSizingHorizontal = "FILL";
@@ -489,7 +533,23 @@ async function regeneratePanel(frame, forceCreate) {
       t.layoutSizingHorizontal = "FILL";
     }
     t.textAutoResize = "HEIGHT";
-    t.setPluginData(LINK_KEY, item.id); // back-reference to the annotated source layer
+    t.setPluginData(LINK_KEY, opts.linkId); // back-reference to the annotated source layer
+  };
+
+  items.forEach((item) => {
+    const u = item.u;
+    appendLine({
+      text: u.text,
+      depth: item.depth,
+      container: u.container,
+      traitRanges: u.traitRanges,
+      hintRange: u.hintRange,
+      linkId: item.id,
+    });
+    // custom descriptions + actions as indented sub-lines
+    for (const sl of item.sublines) {
+      appendLine({ text: sl, depth: item.depth + 1, sub: true, linkId: item.id });
+    }
   });
 
   frame.setPluginData(PANEL_KEY, panel.id);

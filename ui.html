@@ -120,6 +120,9 @@
   .actions-list .action-row { display: flex; gap: 6px; margin-bottom: 6px; }
   .actions-list .action-row input { flex: 1; }
 
+  .desc-row { display: flex; gap: 6px; margin-bottom: 6px; }
+  .desc-row input { flex: 1; min-width: 0; }
+
   /* ---- VoiceOver list (left panel mirror) ---- */
   .vo-item {
     display: flex; gap: 9px; padding: 9px 16px; cursor: pointer; align-items: flex-start;
@@ -138,6 +141,7 @@
   .vo-utterance { font-size: 12px; line-height: 1.35; word-break: break-word; }
   .vo-utterance .trait { color: var(--purple); font-weight: 500; }
   .vo-name { font-size: 9px; color: var(--text-secondary); margin-top: 2px; }
+  .vo-subline { font-size: 11px; color: var(--text-secondary); margin-top: 3px; padding-left: 14px; }
 
   .vo-grip {
     flex: 0 0 auto; cursor: grab; color: var(--text-secondary); padding: 2px 1px;
@@ -244,12 +248,12 @@
           <div class="section">
             <label class="field">
               <span class="field-label">Label</span>
-              <input type="text" id="label" placeholder="What the element is, e.g. “Size”" />
+              <input type="text" id="label" placeholder="What the element is, e.g. “Size”" autocomplete="off" />
             </label>
             <div id="value-section">
             <label class="field">
               <span class="field-label">Value</span>
-              <input type="text" id="value" placeholder="Current value, e.g. “Medium”" />
+              <input type="text" id="value" placeholder="Current value, e.g. “Medium”" autocomplete="off" />
             </label>
             <label class="check">
               <input type="checkbox" id="adjustable" />
@@ -289,13 +293,12 @@
             <button class="btn" id="add-action">+ Add custom action</button>
           </div>
 
-          <!-- Custom description + hint -->
+          <!-- Custom descriptions + hint -->
           <div class="section" id="desc-section">
-            <label class="field">
-              <span class="field-label">Custom description</span>
-              <textarea id="customDescription" placeholder="Overrides the generated description"></textarea>
-            </label>
-            <label class="field">
+            <div class="section-title">Custom descriptions</div>
+            <div class="desc-list" id="descriptions-list"></div>
+            <button class="btn" id="add-description">+ Add custom description</button>
+            <label class="field" style="margin-top:14px;">
               <span class="field-label">Hint</span>
               <input type="text" id="hint" placeholder="Spoken after a pause, e.g. “Double tap to open”" />
             </label>
@@ -370,6 +373,8 @@ let currentId = null;
 let ann = blankAnnotation();
 let listData = [];
 let saveTimer = null;
+// per-field autocomplete sources from the selected layer's inner text nodes
+let suggest = { label: "", value: "" };
 
 function blankAnnotation() {
   // no `kind` here: annKind() defaults undefined -> "element" and still
@@ -384,7 +389,7 @@ function blankAnnotation() {
     traits: [],
     textTraits: [],
     customActions: [],
-    customDescription: "",
+    customDescriptions: [],
     hint: "",
   };
 }
@@ -407,7 +412,24 @@ function resolveValue(a) {
   return (a.value || "").trim();
 }
 
-// returns { main, traits:[...] }  -> traits are highlighted in a different color
+// custom descriptions are { label, value } pairs; migrate the old single string
+function getDescriptions(a) {
+  if (Array.isArray(a.customDescriptions)) return a.customDescriptions;
+  if (a.customDescription && a.customDescription.trim()) {
+    return [{ label: "", value: a.customDescription }];
+  }
+  return [];
+}
+
+// spoken form of one custom description: "value, label"
+function descText(d) {
+  const v = (d.value || "").trim();
+  const l = (d.label || "").trim();
+  if (v && l) return v + ", " + l;
+  return v || l;
+}
+
+// returns { main, traits:[...] } -> traits highlighted in a different color
 function utteranceParts(a) {
   if (!a) return null;
   const kind = annKind(a);
@@ -416,10 +438,6 @@ function utteranceParts(a) {
     const label = (a.label || "").trim();
     if (!label) return null;
     return { main: label, traits: [], hint: "", container: true };
-  }
-
-  if (a.customDescription && a.customDescription.trim()) {
-    return { main: a.customDescription.trim(), traits: [], hint: (a.hint || "").trim() };
   }
 
   const label = (a.label || "").trim();
@@ -449,6 +467,16 @@ function utteranceParts(a) {
   if (t.indexOf("disabled") !== -1) traits.push("Dimmed");
 
   return { main, traits, hint: (a.hint || "").trim() };
+}
+
+// custom descriptions ("value, label") + custom actions, shown as indented
+// sub-lines beneath the element (elements only)
+function subLines(a) {
+  if (annKind(a) !== "element") return [];
+  const out = [];
+  getDescriptions(a).map(descText).filter(Boolean).forEach((s) => out.push(s));
+  (a.customActions || []).map((s) => (s || "").trim()).filter(Boolean).forEach((s) => out.push(s));
+  return out;
 }
 
 function utteranceText(a) {
@@ -526,7 +554,6 @@ function renderForm() {
   document.getElementById("value").value = ann.value || "";
   document.getElementById("adjustable").checked = !!ann.adjustable;
   document.getElementById("enumerated").checked = !!ann.enumerated;
-  document.getElementById("customDescription").value = ann.customDescription || "";
   document.getElementById("hint").value = ann.hint || "";
 
   document.querySelectorAll('input[data-group="traits"]').forEach((el) => {
@@ -539,6 +566,7 @@ function renderForm() {
   document.getElementById("enum-block").classList.toggle("hidden", !ann.adjustable);
   renderValues();
   renderActions();
+  renderDescriptions();
 
   // field visibility per kind:
   //  ignored   -> only the note, no fields
@@ -612,6 +640,38 @@ function renderActions() {
   });
 }
 
+function renderDescriptions() {
+  const list = document.getElementById("descriptions-list");
+  list.innerHTML = "";
+  (ann.customDescriptions || []).forEach((d, i) => {
+    const row = document.createElement("div");
+    row.className = "desc-row";
+
+    const labelInput = document.createElement("input");
+    labelInput.type = "text";
+    labelInput.value = d.label || "";
+    labelInput.placeholder = "Label";
+    labelInput.addEventListener("input", () => { ann.customDescriptions[i].label = labelInput.value; onChange(); });
+
+    const valueInput = document.createElement("input");
+    valueInput.type = "text";
+    valueInput.value = d.value || "";
+    valueInput.placeholder = "Value";
+    valueInput.addEventListener("input", () => { ann.customDescriptions[i].value = valueInput.value; onChange(); });
+
+    const del = document.createElement("button");
+    del.className = "icon-btn";
+    del.textContent = "−";
+    del.title = "Remove description";
+    del.addEventListener("click", () => { ann.customDescriptions.splice(i, 1); renderDescriptions(); onChange(); });
+
+    row.appendChild(labelInput);
+    row.appendChild(valueInput);
+    row.appendChild(del);
+    list.appendChild(row);
+  });
+}
+
 // ===========================================================================
 // Change handling -> live preview + debounced save
 // ===========================================================================
@@ -629,7 +689,11 @@ function updatePreview() {
     return;
   }
   el.className = "utterance";
-  el.innerHTML = utteranceHTML(ann);
+  let html = utteranceHTML(ann);
+  for (const s of subLines(ann)) {
+    html += '<div class="vo-subline" style="font-size:12px;margin-top:5px;">' + esc(s) + "</div>";
+  }
+  el.innerHTML = html;
 }
 
 function save() {
@@ -651,9 +715,40 @@ function bind(id, prop, isCheckbox) {
 bind("label", "label");
 bind("value", "value");
 bind("hint", "hint");
-bind("customDescription", "customDescription");
 bind("adjustable", "adjustable", true);
 bind("enumerated", "enumerated", true);
+
+// ---------------------------------------------------------------------------
+// While a field is empty and focused, show "→ <inner text>" as its placeholder;
+// press → (right arrow) to insert that text.
+// ---------------------------------------------------------------------------
+function setupAutocomplete(inputId, sourceKey) {
+  const input = document.getElementById(inputId);
+  const basePlaceholder = input.placeholder;
+
+  function suggestion() {
+    return (suggest[sourceKey] || "").trim();
+  }
+  function render() {
+    const focused = document.activeElement === input;
+    const s = suggestion();
+    input.placeholder = focused && s ? "→ " + s : basePlaceholder;
+  }
+
+  input.addEventListener("focus", render);
+  input.addEventListener("blur", render);
+  input.addEventListener("keydown", (e) => {
+    const s = suggestion();
+    if (e.key === "ArrowRight" && s && input.value === "") {
+      e.preventDefault();
+      input.value = s;
+      input.dispatchEvent(new Event("input", { bubbles: true })); // updates ann + preview
+      render();
+    }
+  });
+}
+setupAutocomplete("label", "label");
+setupAutocomplete("value", "value");
 
 // element-kind segmented control
 document.querySelectorAll("#kind-seg button").forEach((btn) => {
@@ -674,6 +769,11 @@ document.getElementById("add-action").addEventListener("click", () => {
   if (!ann.customActions) ann.customActions = [];
   ann.customActions.push("");
   renderActions(); onChange();
+});
+document.getElementById("add-description").addEventListener("click", () => {
+  if (!ann.customDescriptions) ann.customDescriptions = [];
+  ann.customDescriptions.push({ label: "", value: "" });
+  renderDescriptions(); onChange();
 });
 document.getElementById("delete").addEventListener("click", () => {
   if (!currentId) return;
@@ -736,7 +836,9 @@ function renderList() {
     row.innerHTML =
       '<div class="vo-grip" title="Drag to reorder">⠿</div>' +
       '<div class="vo-num">' + (isContainer ? "" : elemNum) + "</div>" +
-      '<div class="vo-text"><div class="vo-utterance">' + utteranceHTML(item.ann) + "</div></div>" +
+      '<div class="vo-text"><div class="vo-utterance">' + utteranceHTML(item.ann) + "</div>" +
+        subLines(item.ann).map((s) => '<div class="vo-subline">' + esc(s) + "</div>").join("") +
+      "</div>" +
       '<div class="vo-reorder">' +
         '<button class="ro-btn up" ' + (num === 1 ? "disabled" : "") + ' title="Move up">▲</button>' +
         '<button class="ro-btn down" ' + (last ? "disabled" : "") + ' title="Move down">▼</button>' +
@@ -803,11 +905,15 @@ document.getElementById("highlight").addEventListener("click", () =>
 document.getElementById("clear-highlight").addEventListener("click", () =>
   parent.postMessage({ pluginMessage: { type: "clear-highlight" } }, "*"));
 document.getElementById("copy").addEventListener("click", () => {
-  const script = listData
-    .map((item, i) => (i + 1) + ". " + utteranceText(item.ann))
-    .filter((s) => s.replace(/^\d+\.\s*/, "").length)
-    .join("\n");
-  copyText(script || "No annotations to copy.");
+  const lines = [];
+  listData.forEach((item) => {
+    const main = utteranceText(item.ann);
+    if (!main) return;
+    const indent = "    ".repeat(item.depth || 0);
+    lines.push(indent + main);
+    for (const s of subLines(item.ann)) lines.push(indent + "    " + s);
+  });
+  copyText(lines.join("\n") || "No annotations to copy.");
 });
 
 function copyText(text) {
@@ -833,12 +939,20 @@ onmessage = (event) => {
   if (msg.type === "selection") {
     if (!msg.node) {
       currentId = null;
+      suggest = { label: "", value: "" };
       document.getElementById("no-selection").classList.remove("hidden");
       document.getElementById("inspector").classList.add("hidden");
       updatePreview();
     } else {
       currentId = msg.node.id;
+      suggest = {
+        label: (msg.node.labelText || "").trim(),
+        value: (msg.node.valueText || "").trim(),
+      };
       ann = Object.assign(blankAnnotation(), msg.node.ann || {});
+      // migrate legacy single custom description -> { label, value } pairs
+      if (!Array.isArray(ann.customDescriptions)) ann.customDescriptions = getDescriptions(ann);
+      delete ann.customDescription;
       document.getElementById("no-selection").classList.add("hidden");
       document.getElementById("inspector").classList.remove("hidden");
       renderForm();
