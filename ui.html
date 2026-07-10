@@ -30,7 +30,6 @@
   /* ---- Live VoiceOver preview header ---- */
   .preview {
     padding: 14px 16px 12px;
-    border-bottom: 1px solid var(--border);
     background: var(--bg-secondary);
     flex: 0 0 auto;
     display: flex; align-items: flex-start; gap: 10px;
@@ -83,6 +82,16 @@
   .section-title {
     font-weight: 600; font-size: 11px; margin: 0 0 9px; letter-spacing: .01em;
   }
+  .section.collapsible > .section-title {
+    display: flex; align-items: center; justify-content: flex-start; gap: 3px;
+    cursor: pointer; user-select: none; margin-bottom: 0;
+  }
+  .section.collapsible > .section-title .chev {
+    font-size: 16px; line-height: 1; color: var(--text-secondary); transition: transform .12s ease;
+  }
+  .section.collapsible:not(.collapsed) > .section-title { margin-bottom: 9px; }
+  .section.collapsible.collapsed > .section-title .chev { transform: rotate(-90deg); }
+  .section.collapsible.collapsed > .grid2 { display: none; }
   label.field { display: block; margin-bottom: 9px; }
   label.field:last-child { margin-bottom: 0; }
   .field-label {
@@ -331,19 +340,18 @@
 
           <!-- Traits -->
           <div class="section" id="traits-section">
-            <div class="section-title">Traits</div>
             <div class="grid2" id="traits-grid"></div>
           </div>
 
           <!-- Text traits -->
-          <div class="section" id="texttraits-section">
-            <div class="section-title">Text traits</div>
+          <div class="section collapsible collapsed" id="texttraits-section">
+            <div class="section-title">Text traits <span class="chev" aria-hidden="true">▾</span></div>
             <div class="grid2" id="text-traits-grid"></div>
           </div>
 
           <!-- Behaviour traits -->
-          <div class="section" id="behaviortraits-section">
-            <div class="section-title">Behaviour traits</div>
+          <div class="section collapsible collapsed" id="behaviortraits-section">
+            <div class="section-title">Behaviour traits <span class="chev" aria-hidden="true">▾</span></div>
             <div class="grid2" id="behavior-traits-grid"></div>
           </div>
 
@@ -362,7 +370,7 @@
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" style="border-bottom:none;">
           <button class="btn danger full" id="delete">Remove annotation</button>
         </div>
       </div>
@@ -389,7 +397,8 @@
     <button class="btn" id="native-annotate" title="Write native Figma annotations shown in Dev Mode">Dev Mode</button>
   </div>
   <div class="footer" style="border-top:none; padding-top:0;">
-    <button class="btn full" id="export-vodesign">Download preview</button>
+    <button class="btn" id="export-vodesign">Download preview</button>
+    <button class="btn" id="help-vodesign" title="What is this preview? — VoiceOver Designer" style="flex:0 0 auto; width:30px; padding-left:0; padding-right:0;">?</button>
   </div>
 
   <!-- AI settings overlay -->
@@ -409,11 +418,11 @@
         <option value="openai">OpenAI — GPT-4o</option>
       </select>
     </label>
-    <label class="field">
+    <label class="field" id="anthropic-field">
       <span class="field-label">Anthropic API key <span id="anthropic-status" class="muted"></span></span>
       <input type="password" id="anthropic-key" placeholder="sk-ant-…" autocomplete="off" />
     </label>
-    <label class="field">
+    <label class="field" id="openai-field">
       <span class="field-label">OpenAI API key <span id="openai-status" class="muted"></span></span>
       <input type="password" id="openai-key" placeholder="sk-…" autocomplete="off" />
     </label>
@@ -435,13 +444,20 @@
 // ===========================================================================
 // Trait catalogue (mirrors UIAccessibilityTraits)
 // ===========================================================================
+// `group` overrides which annotation array a trait writes to (defaults to the
+// grid's group). Header/Static text are text traits shown in the first grid.
+// Order fills the 2-col grid row by row:
+//   col 1: Button, Selected, Disabled, Switcher
+//   col 2: Header, Image, Link, Static text
 const TRAITS = [
   { key: "button", label: "Button" },
+  { key: "header", label: "Header", group: "textTraits" },
   { key: "selected", label: "Selected" },
-  { key: "disabled", label: "Disabled" },
-  { key: "switcher", label: "Switcher" },
-  { key: "link", label: "Link" },
   { key: "image", label: "Image" },
+  { key: "disabled", label: "Disabled" },
+  { key: "link", label: "Link" },
+  { key: "switcher", label: "Switcher" },
+  { key: "staticText", label: "Static text", group: "textTraits" },
 ];
 // Behaviour traits also live in ann.traits (same bitmask family), just grouped
 // separately in the UI.
@@ -454,8 +470,6 @@ const BEHAVIOR_TRAITS = [
   { key: "causesPageTurn", label: "Page turn" },
 ];
 const TEXT_TRAITS = [
-  { key: "header", label: "Header" },
-  { key: "staticText", label: "Static text" },
   { key: "textInput", label: "Text Input" },
   { key: "searchField", label: "Search Field" },
   { key: "isEditing", label: "Is editing" },
@@ -612,11 +626,12 @@ function buildChecks(containerId, defs, group) {
   const c = document.getElementById(containerId);
   c.innerHTML = "";
   for (const d of defs) {
+    const g = d.group || group; // per-trait override (e.g. Header → textTraits)
     const lab = document.createElement("label");
     lab.className = "check";
     const input = document.createElement("input");
     input.type = "checkbox";
-    input.dataset.group = group;
+    input.dataset.group = g;
     input.dataset.key = d.key;
     const span = document.createElement("span");
     span.textContent = d.label;
@@ -624,7 +639,7 @@ function buildChecks(containerId, defs, group) {
     lab.appendChild(span);
     c.appendChild(lab);
     input.addEventListener("change", () => {
-      const arr = ann[group];
+      const arr = ann[g];
       const i = arr.indexOf(d.key);
       if (input.checked && i === -1) arr.push(d.key);
       if (!input.checked && i !== -1) arr.splice(i, 1);
@@ -635,6 +650,11 @@ function buildChecks(containerId, defs, group) {
 buildChecks("traits-grid", TRAITS, "traits");
 buildChecks("text-traits-grid", TEXT_TRAITS, "textTraits");
 buildChecks("behavior-traits-grid", BEHAVIOR_TRAITS, "traits");
+
+// collapsible trait sections
+document.querySelectorAll(".section.collapsible > .section-title").forEach((title) => {
+  title.addEventListener("click", () => title.parentElement.classList.toggle("collapsed"));
+});
 
 // ===========================================================================
 // Render the form from `ann`
@@ -1008,6 +1028,8 @@ document.getElementById("export-vodesign").addEventListener("click", () => {
   btn.textContent = "Downloading…";
   parent.postMessage({ pluginMessage: { type: "export-vodesign" } }, "*");
 });
+document.getElementById("help-vodesign").addEventListener("click", () =>
+  parent.postMessage({ pluginMessage: { type: "open-url", url: "https://rubanov.dev/voice-over-designer/" } }, "*"));
 
 // ---------------------------------------------------------------------------
 // AI / heuristic auto-annotation + settings
@@ -1025,6 +1047,13 @@ document.getElementById("ai-annotate").addEventListener("click", () => {
 });
 document.getElementById("heuristic-annotate").addEventListener("click", () =>
   parent.postMessage({ pluginMessage: { type: "heuristic-annotate" } }, "*"));
+
+function updateProviderFields() {
+  const p = document.getElementById("ai-provider").value;
+  document.getElementById("anthropic-field").classList.toggle("hidden", p !== "anthropic");
+  document.getElementById("openai-field").classList.toggle("hidden", p !== "openai");
+}
+document.getElementById("ai-provider").addEventListener("change", updateProviderFields);
 
 function openSettings() {
   document.getElementById("settings-panel").classList.remove("hidden");
@@ -1095,6 +1124,7 @@ onmessage = (event) => {
     document.getElementById("ai-provider").value = msg.provider || "anthropic";
     document.getElementById("anthropic-status").textContent = msg.hasAnthropic ? "— saved" : "— not set";
     document.getElementById("openai-status").textContent = msg.hasOpenAI ? "— saved" : "— not set";
+    updateProviderFields();
   }
 
   if (msg.type === "annotate-done") {
