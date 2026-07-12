@@ -15,6 +15,10 @@ const AI_PROVIDER_KEY = "a11y-ai-provider";
 const ANTHROPIC_KEY = "a11y-anthropic-key";
 const OPENAI_KEY = "a11y-openai-key";
 
+// PNG export scale for .vodesign — the same value is written as info.imageScale
+// so the overlays always line up with the exported image.
+const EXPORT_SCALE = 3;
+
 // restore the last window size the user dragged to
 figma.clientStorage
   .getAsync(SIZE_KEY)
@@ -274,22 +278,23 @@ function hierarchicalItems(frame) {
     });
 
   const out = [];
-  const walk = (list, depth) => {
+  const walk = (list, depth, parentId) => {
     for (const x of sortSiblings(list)) {
-      out.push({ node: x.node, ann: x.ann, depth });
-      if (isContainer(x)) walk(children[x.node.id] || [], depth + 1);
+      out.push({ node: x.node, ann: x.ann, depth, parentId });
+      if (isContainer(x)) walk(children[x.node.id] || [], depth + 1, x.node.id);
     }
   };
-  walk(roots, 0);
+  walk(roots, 0, null);
   return out;
 }
 
 function buildList(frame) {
-  return hierarchicalItems(frame).map(({ node, ann, depth }) => ({
+  return hierarchicalItems(frame).map(({ node, ann, depth, parentId }) => ({
     id: node.id,
     name: node.name,
     ann,
     depth,
+    parentId: parentId || null, // reading-order parent container, for same-parent reordering
   }));
 }
 
@@ -416,15 +421,22 @@ async function drawHighlights() {
 
   const overlays = [];
   items.forEach((item, index) => {
-    const box = item.node.absoluteBoundingBox;
+    const node = item.node;
+    const box = node.absoluteBoundingBox;
     if (!box) return;
     const color = colorForAnnotation(item.ann);
 
     const rect = figma.createRectangle();
     rect.name = `a11y-overlay-${index + 1}`;
-    rect.x = box.x;
-    rect.y = box.y;
-    rect.resize(Math.max(box.width, 1), Math.max(box.height, 1));
+    // Match the node's own size + absolute rotation/position so rotated elements
+    // get a tight, rotated overlay instead of an inflated axis-aligned box.
+    rect.resize(Math.max(node.width, 1), Math.max(node.height, 1));
+    if (node.absoluteTransform) {
+      rect.relativeTransform = node.absoluteTransform; // rect is page-parented → relative == absolute
+    } else {
+      rect.x = box.x;
+      rect.y = box.y;
+    }
     rect.fills = [{ type: "SOLID", color, opacity: 0.45 }];
     rect.strokes = [{ type: "SOLID", color }];
     rect.strokeWeight = 1.5;
@@ -436,7 +448,7 @@ async function drawHighlights() {
     badge.fontSize = 12;
     badge.characters = String(index + 1);
     badge.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }];
-    badge.x = box.x + 4;
+    badge.x = box.x + 4; // badge stays upright at the element's top-left corner
     badge.y = box.y + 4;
     overlays.push(badge);
   });
@@ -447,7 +459,9 @@ async function drawHighlights() {
   group.setPluginData(HIGHLIGHT_FRAME_KEY, frame.id); // scope so redraws only clear this frame
   group.locked = true;
   group.expanded = false;
-  figma.notify(`Highlighted ${items.length} annotated element${items.length === 1 ? "" : "s"}.`);
+  figma.notify(
+    `Highlighted ${items.length} annotated element${items.length === 1 ? "" : "s"} — re-run after moving layers.`
+  );
 }
 
 const HIGHLIGHT_FRAME_KEY = "a11yHlFrame";
@@ -494,6 +508,16 @@ async function getExistingPanel(frame) {
 }
 
 // forceCreate=false -> only refresh a panel that already exists (live accumulate)
+// Debounced live-panel refresh: coalesce rapid saves (typing) into one rebuild.
+let panelTimer = null;
+function schedulePanelRegen(frame) {
+  if (panelTimer) clearTimeout(panelTimer);
+  panelTimer = setTimeout(() => {
+    panelTimer = null;
+    regeneratePanel(frame, false);
+  }, 600);
+}
+
 async function regeneratePanel(frame, forceCreate) {
   const prev = await getExistingPanel(frame);
   if (!prev && !forceCreate) return false;
@@ -626,17 +650,31 @@ const TRAIT_BITS = {
   keyboardKey: 65536, disabled: 131072,
 };
 
+// Returns a BigInt so switch(2^53) combined with odd low bits (e.g. + button)
+// stays exact — a JS Number would round 2^53+1 down to 2^53.
 function traitsToBitmask(a) {
-  let bits = 0;
+  let bits = 0n;
   const added = {};
   const add = (k) => {
     const v = TRAIT_BITS[k];
-    if (v && !added[v]) { bits += v; added[v] = 1; } // add, not |=, so bit 53 survives
+    if (v && !added[v]) { bits += BigInt(v); added[v] = 1; }
   };
   (a.traits || []).forEach(add);
   (a.textTraits || []).forEach(add);
   if (a.adjustable) add("adjustable");
   return bits;
+}
+
+// JSON.stringify can't serialize BigInt, so encode any BigInt as a sentinel
+// string, then unquote it back to an exact integer literal (VoiceOver Designer
+// decodes it losslessly into a 64-bit trait).
+function stringifyControls(controls) {
+  const json = JSON.stringify(
+    controls,
+    (k, v) => (typeof v === "bigint" ? "@@int:" + v.toString() + "@@" : v),
+    2
+  );
+  return json.replace(/"@@int:(\d+)@@"/g, "$1");
 }
 
 // hex-only UUID (VoiceOver Designer requires 0-9 A-F)
@@ -1065,9 +1103,9 @@ figma.ui.onmessage = async (msg) => {
           break;
         }
         await pushList();
-        // live-accumulate: keep an existing panel in sync as you type
-        const frame = topLevelFrameOf(node);
-        await regeneratePanel(frame, false);
+        // live-accumulate: keep an existing panel in sync, but debounced so it
+        // doesn't rebuild every text node on every keystroke.
+        schedulePanelRegen(topLevelFrameOf(node));
       }
       break;
     }
@@ -1194,18 +1232,20 @@ figma.ui.onmessage = async (msg) => {
       }
       let pngData;
       try {
-        pngData = await frame.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: 3 } });
+        pngData = await frame.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: EXPORT_SCALE } });
       } catch (e) {
         figma.notify("Couldn't render the frame PNG.", { error: true });
         break;
       }
-      const info = { id: newUUID(), imageScale: 3 };
+      // imageScale must equal the PNG export scale for VoiceOver Designer to
+      // align the overlays with the image — keep them tied to one constant.
+      const info = { id: newUUID(), imageScale: EXPORT_SCALE };
       const safeName =
         (frame.name || "screen").replace(/[^a-zA-Z0-9а-яА-ЯёЁ\s-]/g, "").trim() || "screen";
       figma.ui.postMessage({
         type: "save-markup",
-        pngData: Array.from(pngData),
-        controlsJson: JSON.stringify(controls, null, 2),
+        pngData: pngData, // Uint8Array — structured-cloned directly (no number-array copy)
+        controlsJson: stringifyControls(controls),
         infoJson: JSON.stringify(info, null, 2),
         folderName: safeName + ".vodesign",
       });

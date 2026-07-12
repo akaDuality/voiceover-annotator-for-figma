@@ -967,7 +967,8 @@ function renderList() {
     num++;
     const isContainer = annKind(item.ann) === "container";
     if (!isContainer) elemNum++;
-    const last = num === visible.length;
+    const hasPrev = prevSiblingIndex(i) !== i; // only reorder within the same parent
+    const hasNext = nextSiblingIndex(i) !== i;
     const row = document.createElement("div");
     row.className = "vo-item" + (item.id === currentId ? " sel" : "") + (isContainer ? " is-container" : "");
     row.draggable = true;
@@ -979,8 +980,8 @@ function renderList() {
         subLines(item.ann).map((s) => '<div class="vo-subline">' + esc(s) + "</div>").join("") +
       "</div>" +
       '<div class="vo-reorder">' +
-        '<button class="ro-btn up" ' + (num === 1 ? "disabled" : "") + ' title="Move up">▲</button>' +
-        '<button class="ro-btn down" ' + (last ? "disabled" : "") + ' title="Move down">▼</button>' +
+        '<button class="ro-btn up" ' + (hasPrev ? "" : "disabled") + ' title="Move up">▲</button>' +
+        '<button class="ro-btn down" ' + (hasNext ? "" : "disabled") + ' title="Move down">▼</button>' +
       "</div>";
 
     row.addEventListener("click", () => {
@@ -988,11 +989,11 @@ function renderList() {
     });
     row.querySelector(".ro-btn.up").addEventListener("click", (e) => {
       e.stopPropagation();
-      moveItem(i, prevVisibleIndex(i));
+      moveItem(i, prevSiblingIndex(i));
     });
     row.querySelector(".ro-btn.down").addEventListener("click", (e) => {
       e.stopPropagation();
-      moveItem(i, nextVisibleIndex(i));
+      moveItem(i, nextSiblingIndex(i));
     });
 
     // drag & drop
@@ -1009,6 +1010,7 @@ function renderList() {
     row.addEventListener("dragover", (e) => {
       e.preventDefault();
       if (dragFrom === null || dragFrom === i) return;
+      if (listData[dragFrom].parentId !== item.parentId) { e.dataTransfer.dropEffect = "none"; return; }
       row.classList.toggle("drop-before", i < dragFrom);
       row.classList.toggle("drop-after", i > dragFrom);
     });
@@ -1016,6 +1018,7 @@ function renderList() {
     row.addEventListener("drop", (e) => {
       e.preventDefault();
       if (dragFrom === null || dragFrom === i) return;
+      if (listData[dragFrom].parentId !== item.parentId) { dragFrom = null; return; } // same parent only
       moveItem(dragFrom, i);
       dragFrom = null;
     });
@@ -1024,13 +1027,17 @@ function renderList() {
   });
 }
 
-// neighbouring indices that are actually visible (skip empty-utterance items)
-function prevVisibleIndex(i) {
-  for (let j = i - 1; j >= 0; j--) if (utteranceText(listData[j].ann)) return j;
+// nearest visible sibling (same reading-order parent) in each direction
+function prevSiblingIndex(i) {
+  const p = listData[i].parentId;
+  for (let j = i - 1; j >= 0; j--)
+    if (utteranceText(listData[j].ann) && listData[j].parentId === p) return j;
   return i;
 }
-function nextVisibleIndex(i) {
-  for (let j = i + 1; j < listData.length; j++) if (utteranceText(listData[j].ann)) return j;
+function nextSiblingIndex(i) {
+  const p = listData[i].parentId;
+  for (let j = i + 1; j < listData.length; j++)
+    if (utteranceText(listData[j].ann) && listData[j].parentId === p) return j;
   return i;
 }
 
