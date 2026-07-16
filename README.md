@@ -1,5 +1,7 @@
 # VoiceOver Annotator — Figma plugin
 
+<img width="2560" height="1440" alt="photo_2026-07-12 11 54 51" src="https://github.com/user-attachments/assets/6d92faec-3b54-4647-919a-3e4f84d2fb15" />
+
 Annotate Figma frames with iOS accessibility settings and get the generated
 VoiceOver reading aloud — the way [VoiceOver Designer](https://github.com/akaDuality/VoiceOverDesigner)
 and [Apple's Accessibility Inspector](https://developer.apple.com/documentation/accessibility/accessibility-inspector)
@@ -22,6 +24,9 @@ work, but inside Figma.
 
 Annotations are stored on each node with `setPluginData`, so they travel with
 the file and survive reopening.
+
+
+<img width="1920" height="1080" alt="scr1" src="https://github.com/user-attachments/assets/ba50ac69-0143-4c8a-b119-4344924bd784" />
 
 ## Install (development)
 
