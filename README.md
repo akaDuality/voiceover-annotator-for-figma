@@ -1,6 +1,6 @@
-# VoiceOver Annotator — Figma plugin
-
 <img width="2560" height="1440" alt="photo_2026-07-12 11 54 51" src="https://github.com/user-attachments/assets/6d92faec-3b54-4647-919a-3e4f84d2fb15" />
+
+# VoiceOver Annotator — Figma plugin
 
 Annotate Figma frames with iOS accessibility settings and get the generated
 VoiceOver reading aloud — the way [VoiceOver Designer](https://github.com/akaDuality/VoiceOverDesigner)
