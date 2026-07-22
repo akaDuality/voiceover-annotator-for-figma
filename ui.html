@@ -1429,26 +1429,6 @@ function speechIsAvailable() {
   return "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
 }
 
-function choosePreviewVoice(language) {
-  if (!speechIsAvailable()) return null;
-  const voices = window.speechSynthesis.getVoices()
-    .filter((voice) => new RegExp("^" + language + "(?:-|_)", "i").test(voice.lang));
-  if (!voices.length) return null;
-
-  // SpeechSynthesis has no gender field, and voice names differ between macOS
-  // and Windows. Prefer common female system voices on both platforms, then a
-  // non-male voice in the requested locale, then the locale's first voice.
-  const femaleName = language === "ru"
-    ? /milena|alena|alyona|katya|katerina|irina|svetlana|daria|female|google.*рус/i
-    : /samantha|ava|victoria|karen|zira|jenny|aria|sonia|libby|hazel|susan|female|google.*english/i;
-  const maleName = language === "ru"
-    ? /yuri|yury|maxim|maksim|pavel|alexander|aleksandr/i
-    : /alex|daniel|david|fred|george|guy|james|mark|oliver|ryan|thomas/i;
-  return voices.find((voice) => femaleName.test(voice.name))
-    || voices.find((voice) => !maleName.test(voice.name))
-    || voices[0];
-}
-
 function setSpeakingItem(id) {
   speakingItemId = id;
   document.querySelectorAll(".vo-item").forEach((row) => {
@@ -1489,10 +1469,6 @@ function playReadingOrder() {
   if (!items.length) return;
 
   window.speechSynthesis.cancel();
-  const previewVoices = {
-    ru: choosePreviewVoice("ru"),
-    en: choosePreviewVoice("en"),
-  };
   const runId = ++speechRunId;
   let index = 0;
 
@@ -1509,9 +1485,7 @@ function playReadingOrder() {
     updateSpeechButton();
     const utterance = new SpeechSynthesisUtterance(item.text);
     const language = /[\u0400-\u04FF]/.test(item.text) ? "ru" : "en";
-    const previewVoice = previewVoices[language];
-    if (previewVoice) utterance.voice = previewVoice;
-    utterance.lang = previewVoice ? previewVoice.lang : (language === "ru" ? "ru-RU" : "en-US");
+    utterance.lang = language === "ru" ? "ru-RU" : "en-US";
     utterance.rate = 1.20;
     utterance.onend = () => setTimeout(speakNext, 180);
     utterance.onerror = (event) => {
