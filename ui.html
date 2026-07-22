@@ -152,6 +152,10 @@
   }
   .vo-item:hover { background: var(--bg-hover); }
   .vo-item.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .vo-item.speaking {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
   .vo-num {
     flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%;
     background: var(--bg-hover); color: var(--text-secondary);
@@ -235,6 +239,15 @@
   .ai-row #settings-btn {
     flex: 0 0 auto; width: 30px; padding-left: 0; padding-right: 0; font-size: 20px;
   }
+
+  /* Reading-order actions: full-width outline button + matching square icon. */
+  .reading-actions { display: flex; gap: var(--fp-space-2); }
+  .reading-actions #highlight { flex: 1 1 auto; width: auto; }
+  .reading-actions #play-reading-order {
+    flex: 0 0 var(--fp-space-8); width: var(--fp-space-8); padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .reading-actions #play-reading-order svg { display: block; }
 
   /* segmented control */
   .segmented {
@@ -722,8 +735,13 @@
 
     <!-- ============ READING ORDER LIST ============ -->
     <div class="page" id="page-list">
-      <div class="section">
+      <div class="section reading-actions">
         <button class="btn full" id="highlight">Outline accessibility frames</button>
+        <button class="btn" id="play-reading-order" type="button" title="Listen to reading order" aria-label="Listen to reading order">
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M3 1.75v8.5L10 6 3 1.75Z" fill="currentColor"/>
+          </svg>
+        </button>
       </div>
       <div id="list-empty" class="empty-state">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
@@ -830,6 +848,8 @@ let currentId = null;
 let ann = blankAnnotation();
 let listData = [];
 let saveTimer = null;
+let speechRunId = 0;
+let speakingItemId = null;
 // per-field autocomplete sources from the selected layer's inner text nodes
 let suggest = { label: "", value: "" };
 
@@ -942,6 +962,37 @@ function utteranceText(a) {
   let s = p.main;
   for (const tr of p.traits) s += ". " + tr;
   if (p.traits.length) s += ".";
+  if (p.hint) s += (s.endsWith(".") || s === "" ? " " : ". ") + p.hint;
+  return s.trim();
+}
+
+// Keep the visible Reading Order terminology in English, but speak VoiceOver
+// traits in the language of the element's label/value/hint.
+function spokenUtteranceText(a) {
+  const p = utteranceParts(a);
+  if (!p) return "";
+  if (p.container) return p.main;
+
+  const isRussian = /[\u0400-\u04FF]/.test([p.main, p.hint].join(" "));
+  const russianTraits = {
+    "Selected": "Выбрано",
+    "Heading": "Заголовок",
+    "Adjustable": "Регулируется",
+    "Button": "Кнопка",
+    "Switch Button": "Переключатель",
+    "Link": "Ссылка",
+    "Image": "Изображение",
+    "Search Field": "Поле поиска",
+    "Text Field": "Текстовое поле",
+    "Dimmed": "Недоступно",
+  };
+  const traits = isRussian
+    ? p.traits.map((trait) => russianTraits[trait] || trait)
+    : p.traits;
+
+  let s = p.main;
+  for (const trait of traits) s += ". " + trait;
+  if (traits.length) s += ".";
   if (p.hint) s += (s.endsWith(".") || s === "" ? " " : ". ") + p.hint;
   return s.trim();
 }
@@ -1298,6 +1349,7 @@ function renderList() {
   const wrap = document.getElementById("list");
   const visible = listData.filter((item) => utteranceText(item.ann));
   document.getElementById("list-count").textContent = visible.length;
+  updateSpeechButton();
   document.getElementById("list-empty").classList.toggle("hidden", visible.length > 0);
   document.getElementById("list-hint").classList.toggle("hidden", visible.length === 0);
   wrap.innerHTML = "";
@@ -1312,7 +1364,8 @@ function renderList() {
     const hasPrev = prevSiblingIndex(i) !== i; // only reorder within the same parent
     const hasNext = nextSiblingIndex(i) !== i;
     const row = document.createElement("div");
-    row.className = "vo-item" + (item.id === currentId ? " sel" : "") + (isContainer ? " is-container" : "");
+    row.className = "vo-item" + (item.id === currentId ? " sel" : "") + (item.id === speakingItemId ? " speaking" : "") + (isContainer ? " is-container" : "");
+    row.dataset.itemId = item.id;
     row.draggable = true;
     row.style.paddingLeft = 16 + (item.depth || 0) * 14 + "px";
     row.innerHTML =
@@ -1369,6 +1422,108 @@ function renderList() {
   });
 }
 
+// ===========================================================================
+// Local speech preview for the current reading order
+// ===========================================================================
+function speechIsAvailable() {
+  return "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
+}
+
+function choosePreviewVoice(language) {
+  if (!speechIsAvailable()) return null;
+  const voices = window.speechSynthesis.getVoices()
+    .filter((voice) => new RegExp("^" + language + "(?:-|_)", "i").test(voice.lang));
+  if (!voices.length) return null;
+
+  // SpeechSynthesis has no gender field, and voice names differ between macOS
+  // and Windows. Prefer common female system voices on both platforms, then a
+  // non-male voice in the requested locale, then the locale's first voice.
+  const femaleName = language === "ru"
+    ? /milena|alena|alyona|katya|katerina|irina|svetlana|daria|female|google.*рус/i
+    : /samantha|ava|victoria|karen|zira|jenny|aria|sonia|libby|hazel|susan|female|google.*english/i;
+  const maleName = language === "ru"
+    ? /yuri|yury|maxim|maksim|pavel|alexander|aleksandr/i
+    : /alex|daniel|david|fred|george|guy|james|mark|oliver|ryan|thomas/i;
+  return voices.find((voice) => femaleName.test(voice.name))
+    || voices.find((voice) => !maleName.test(voice.name))
+    || voices[0];
+}
+
+function setSpeakingItem(id) {
+  speakingItemId = id;
+  document.querySelectorAll(".vo-item").forEach((row) => {
+    row.classList.toggle("speaking", !!id && row.dataset.itemId === id);
+  });
+  const active = Array.from(document.querySelectorAll(".vo-item"))
+    .find((row) => row.dataset.itemId === id);
+  if (active) active.scrollIntoView({ block: "nearest" });
+}
+
+function updateSpeechButton() {
+  const btn = document.getElementById("play-reading-order");
+  if (!btn) return;
+  const speaking = speakingItemId !== null;
+  const hasItems = listData.some((item) => utteranceText(item.ann));
+  btn.disabled = !speechIsAvailable() || (!hasItems && !speaking);
+  btn.title = speechIsAvailable()
+    ? (speaking ? "Stop reading" : "Listen to reading order")
+    : "Speech preview is unavailable in this version of Figma";
+  btn.setAttribute("aria-label", btn.title);
+  btn.innerHTML = speaking
+    ? '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="1" y="1" width="8" height="8" rx="1" fill="currentColor"/></svg>'
+    : '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.75v8.5L10 6 3 1.75Z" fill="currentColor"/></svg>';
+}
+
+function stopReadingOrder() {
+  speechRunId++;
+  if (speechIsAvailable()) window.speechSynthesis.cancel();
+  setSpeakingItem(null);
+  updateSpeechButton();
+}
+
+function playReadingOrder() {
+  if (!speechIsAvailable()) return;
+  const items = listData
+    .map((item) => ({ id: item.id, text: spokenUtteranceText(item.ann) }))
+    .filter((item) => item.text);
+  if (!items.length) return;
+
+  window.speechSynthesis.cancel();
+  const previewVoices = {
+    ru: choosePreviewVoice("ru"),
+    en: choosePreviewVoice("en"),
+  };
+  const runId = ++speechRunId;
+  let index = 0;
+
+  function speakNext() {
+    if (runId !== speechRunId) return;
+    if (index >= items.length) {
+      setSpeakingItem(null);
+      updateSpeechButton();
+      return;
+    }
+
+    const item = items[index++];
+    setSpeakingItem(item.id);
+    updateSpeechButton();
+    const utterance = new SpeechSynthesisUtterance(item.text);
+    const language = /[\u0400-\u04FF]/.test(item.text) ? "ru" : "en";
+    const previewVoice = previewVoices[language];
+    if (previewVoice) utterance.voice = previewVoice;
+    utterance.lang = previewVoice ? previewVoice.lang : (language === "ru" ? "ru-RU" : "en-US");
+    utterance.rate = 1.20;
+    utterance.onend = () => setTimeout(speakNext, 180);
+    utterance.onerror = (event) => {
+      if (event.error === "canceled" || event.error === "interrupted") return;
+      setTimeout(speakNext, 180);
+    };
+    window.speechSynthesis.speak(utterance);
+  }
+
+  speakNext();
+}
+
 // nearest visible sibling (same reading-order parent) in each direction
 function prevSiblingIndex(i) {
   const p = listData[i].parentId;
@@ -1392,6 +1547,10 @@ document.getElementById("native-annotate").addEventListener("click", () =>
   parent.postMessage({ pluginMessage: { type: "native-annotate" } }, "*"));
 document.getElementById("highlight").addEventListener("click", () =>
   parent.postMessage({ pluginMessage: { type: "highlight" } }, "*"));
+document.getElementById("play-reading-order").addEventListener("click", () => {
+  if (speakingItemId !== null) stopReadingOrder();
+  else playReadingOrder();
+});
 document.getElementById("clear-highlight").addEventListener("click", () =>
   parent.postMessage({ pluginMessage: { type: "clear-highlight" } }, "*"));
 document.getElementById("export-vodesign").addEventListener("click", () => {
@@ -1694,6 +1853,7 @@ function buildZip(entries) {
   });
 })();
 
+updateSpeechButton();
 parent.postMessage({ pluginMessage: { type: "ready" } }, "*");
 </script>
 </body>
