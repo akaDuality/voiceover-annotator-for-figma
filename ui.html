@@ -148,13 +148,16 @@
   /* ---- VoiceOver list (left panel mirror) ---- */
   .vo-item {
     display: flex; gap: 9px; padding: 9px 16px; cursor: pointer; align-items: flex-start;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--border); background: var(--bg);
   }
   .vo-item:hover { background: var(--bg-hover); }
-  .vo-item.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .vo-item.sel { background: color-mix(in srgb, var(--accent) 16%, var(--bg)); }
   .vo-item.speaking {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
     box-shadow: inset 2px 0 0 var(--accent);
+  }
+  #list.suppress-hover .vo-item:hover:not(.sel):not(.speaking) {
+    background: var(--bg);
   }
   .vo-num {
     flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%;
@@ -182,14 +185,13 @@
   }
   .ro-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
   .ro-btn:disabled { opacity: .3; cursor: default; }
-  .vo-item.dragging { opacity: .45; }
   .vo-item.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
   .vo-item.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
-  .list-hint {
-    padding: 8px 16px; font-size: 10px; color: var(--text-secondary);
-    border-bottom: 1px solid var(--border); background: var(--bg-secondary);
+  .vo-item.drop-ghost {
+    position: fixed; z-index: 1000; margin: 0; pointer-events: none;
+    opacity: .45; box-shadow: 0 4px 14px rgba(0, 0, 0, .22);
   }
-
+  #list.reordering .ro-btn { pointer-events: none; }
   .empty-state {
     padding: 40px 24px; text-align: center; color: var(--text-secondary); font-size: 12px;
   }
@@ -747,7 +749,6 @@
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
         <div>No annotations yet.<br/>Annotate layers to build the reading order.</div>
       </div>
-      <div class="list-hint" id="list-hint">Drag rows — or use ▲▼ — to set the VoiceOver reading order.</div>
       <div id="list"></div>
     </div>
   </div>
@@ -924,8 +925,10 @@ function utteranceParts(a) {
   else main = label || value;
 
   // adjustable position "2 of 3"
+  let enumeratedPosition = null;
   if (a.adjustable && a.enumerated && a.values && a.values.length > 1) {
     const pos = Math.min(Math.max(a.selectedIndex || 0, 0), a.values.length - 1) + 1;
+    enumeratedPosition = { current: pos, total: a.values.length };
     main += ", " + pos + " of " + a.values.length;
   }
 
@@ -943,7 +946,7 @@ function utteranceParts(a) {
   if (tt.indexOf("textInput") !== -1) traits.push("Text Field");
   if (t.indexOf("disabled") !== -1) traits.push("Dimmed");
 
-  return { main, traits, hint: (a.hint || "").trim() };
+  return { main, traits, hint: (a.hint || "").trim(), enumeratedPosition };
 }
 
 // custom descriptions ("value, label") + custom actions, shown as indented
@@ -990,7 +993,17 @@ function spokenUtteranceText(a) {
     ? p.traits.map((trait) => russianTraits[trait] || trait)
     : p.traits;
 
-  let s = p.main;
+  let spokenMain = p.main;
+  if (isRussian && p.enumeratedPosition) {
+    const position = p.enumeratedPosition;
+    const englishSuffix = ", " + position.current + " of " + position.total;
+    if (spokenMain.endsWith(englishSuffix)) {
+      spokenMain = spokenMain.slice(0, -englishSuffix.length) +
+        ", " + position.current + " из " + position.total;
+    }
+  }
+
+  let s = spokenMain;
   for (const trait of traits) s += ". " + trait;
   if (traits.length) s += ".";
   if (p.hint) s += (s.endsWith(".") || s === "" ? " " : ". ") + p.hint;
@@ -1195,7 +1208,10 @@ function renderDescriptions() {
 function onChange() {
   updatePreview();
   if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(save, 220);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    save();
+  }, 220);
 }
 
 function updatePreview() {
@@ -1328,6 +1344,8 @@ document.querySelectorAll(".tab").forEach((tab) => {
 // Reading order list
 // ===========================================================================
 let dragFrom = null;
+let dragPointerOffset = { x: 0, y: 0 };
+let hoverSuppressionGeneration = 0;
 
 function sendReorder() {
   parent.postMessage(
@@ -1336,13 +1354,176 @@ function sendReorder() {
   );
 }
 
+function rowPositions() {
+  const positions = new Map();
+  document.querySelectorAll("#list .vo-item").forEach((row) => {
+    positions.set(row.dataset.itemId, row.getBoundingClientRect().top);
+  });
+  return positions;
+}
+
+function rowById(id) {
+  return Array.from(document.querySelectorAll("#list .vo-item"))
+    .find((row) => row.dataset.itemId === id);
+}
+
+function suppressHoverDuringReorder(wrap) {
+  const generation = ++hoverSuppressionGeneration;
+  let reorderFinished = false;
+  let pointerMoved = false;
+  wrap.classList.add("suppress-hover");
+  const onPointerMove = () => {
+    if (generation !== hoverSuppressionGeneration) {
+      document.removeEventListener("pointermove", onPointerMove);
+      return;
+    }
+    pointerMoved = true;
+    if (!reorderFinished) return;
+    wrap.classList.remove("suppress-hover");
+    document.removeEventListener("pointermove", onPointerMove);
+  };
+  document.addEventListener("pointermove", onPointerMove);
+  return () => {
+    if (generation !== hoverSuppressionGeneration) return;
+    reorderFinished = true;
+    if (!pointerMoved) return;
+    wrap.classList.remove("suppress-hover");
+    document.removeEventListener("pointermove", onPointerMove);
+  };
+}
+
+function animateReorderedRows(previousPositions) {
+  const wrap = document.getElementById("list");
+  const animatedRows = [];
+  wrap.classList.add("reordering");
+  const finishHoverSuppression = suppressHoverDuringReorder(wrap);
+  wrap.querySelectorAll(".vo-item").forEach((row) => {
+    const previousTop = previousPositions.get(row.dataset.itemId);
+    if (previousTop === undefined) return;
+    const deltaY = previousTop - row.getBoundingClientRect().top;
+    if (deltaY === 0) return;
+    row.style.transition = "none";
+    row.style.transform = "translateY(" + deltaY + "px)";
+    animatedRows.push(row);
+  });
+
+  // Commit the inverse positions before starting the transition. Two frames
+  // are intentional: Figma's embedded browser may batch a single RAF with the
+  // DOM rebuild and otherwise paint only the final state.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    animatedRows.forEach((row) => {
+      row.style.transition = "transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)";
+      row.style.transform = "translateY(0)";
+    });
+    setTimeout(() => {
+      animatedRows.forEach((row) => {
+        row.style.transition = "";
+        row.style.transform = "";
+      });
+      wrap.classList.remove("reordering");
+      finishHoverSuppression();
+      sendReorder();
+    }, 300);
+  }));
+}
+
+function animateDroppedRow(previousPositions, movedId, dropPosition, sourceRect) {
+  const wrap = document.getElementById("list");
+  const destinationRow = rowById(movedId);
+  if (!destinationRow) {
+    sendReorder();
+    return;
+  }
+
+  const destinationRect = destinationRow.getBoundingClientRect();
+  const ghost = destinationRow.cloneNode(true);
+  const animatedRows = [];
+
+  wrap.classList.add("reordering");
+  const finishHoverSuppression = suppressHoverDuringReorder(wrap);
+  destinationRow.style.visibility = "hidden";
+
+  wrap.querySelectorAll(".vo-item").forEach((row) => {
+    if (row.dataset.itemId === movedId) return;
+    const previousTop = previousPositions.get(row.dataset.itemId);
+    if (previousTop === undefined) return;
+    const deltaY = previousTop - row.getBoundingClientRect().top;
+    if (deltaY === 0) return;
+    row.style.transition = "none";
+    row.style.transform = "translateY(" + deltaY + "px)";
+    animatedRows.push(row);
+  });
+
+  ghost.classList.remove("dragging", "drop-before", "drop-after");
+  ghost.classList.add("drop-ghost");
+  ghost.removeAttribute("draggable");
+  ghost.style.left = dropPosition.x + "px";
+  ghost.style.top = dropPosition.y + "px";
+  ghost.style.width = sourceRect.width + "px";
+  ghost.style.height = sourceRect.height + "px";
+  ghost.style.transition = "none";
+  ghost.style.transform = "translate(0, 0)";
+  document.body.appendChild(ghost);
+
+  const deltaX = destinationRect.left - dropPosition.x;
+  const deltaY = destinationRect.top - dropPosition.y;
+
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    animatedRows.forEach((row) => {
+      row.style.transition = "transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)";
+      row.style.transform = "translateY(0)";
+    });
+    ghost.style.transition =
+      "transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), " +
+      "opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), " +
+      "box-shadow 0.3s cubic-bezier(0.16, 1, 0.3, 1)";
+    ghost.style.transform = "translate(" + deltaX + "px, " + deltaY + "px)";
+    ghost.style.opacity = "1";
+    ghost.style.boxShadow = "none";
+
+    setTimeout(() => {
+      animatedRows.forEach((row) => {
+        row.style.transition = "";
+        row.style.transform = "";
+      });
+      destinationRow.style.visibility = "";
+      ghost.remove();
+      wrap.classList.remove("reordering");
+      finishHoverSuppression();
+      sendReorder();
+    }, 300);
+  }));
+}
+
 // move item at index `from` to index `to` within listData, then persist
-function moveItem(from, to) {
+function moveItem(from, to, animateRows) {
   if (to < 0 || to >= listData.length || from === to) return;
+  const previousPositions = animateRows ? rowPositions() : null;
   const moved = listData.splice(from, 1)[0];
   listData.splice(to, 0, moved);
   renderList();
-  sendReorder();
+  if (previousPositions) {
+    animateReorderedRows(previousPositions);
+  } else {
+    sendReorder();
+  }
+}
+
+function moveDroppedItem(from, to, event) {
+  if (to < 0 || to >= listData.length || from === to) return;
+  const sourceRow = rowById(listData[from].id);
+  if (!sourceRow) return;
+
+  const previousPositions = rowPositions();
+  const sourceRect = sourceRow.getBoundingClientRect();
+  const dropPosition = {
+    x: event.clientX - dragPointerOffset.x,
+    y: event.clientY - dragPointerOffset.y
+  };
+  const moved = listData.splice(from, 1)[0];
+  listData.splice(to, 0, moved);
+  renderList();
+  animateDroppedRow(previousPositions, moved.id, dropPosition, sourceRect);
 }
 
 function renderList() {
@@ -1351,7 +1532,6 @@ function renderList() {
   document.getElementById("list-count").textContent = visible.length;
   updateSpeechButton();
   document.getElementById("list-empty").classList.toggle("hidden", visible.length > 0);
-  document.getElementById("list-hint").classList.toggle("hidden", visible.length === 0);
   wrap.innerHTML = "";
 
   let num = 0;     // visible position (for first/last button state)
@@ -1384,16 +1564,21 @@ function renderList() {
     });
     row.querySelector(".ro-btn.up").addEventListener("click", (e) => {
       e.stopPropagation();
-      moveItem(i, prevSiblingIndex(i));
+      moveItem(i, prevSiblingIndex(i), true);
     });
     row.querySelector(".ro-btn.down").addEventListener("click", (e) => {
       e.stopPropagation();
-      moveItem(i, nextSiblingIndex(i));
+      moveItem(i, nextSiblingIndex(i), true);
     });
 
     // drag & drop
     row.addEventListener("dragstart", (e) => {
       dragFrom = i;
+      const rect = row.getBoundingClientRect();
+      dragPointerOffset = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      };
       row.classList.add("dragging");
       e.dataTransfer.effectAllowed = "move";
     });
@@ -1414,7 +1599,7 @@ function renderList() {
       e.preventDefault();
       if (dragFrom === null || dragFrom === i) return;
       if (listData[dragFrom].parentId !== item.parentId) { dragFrom = null; return; } // same parent only
-      moveItem(dragFrom, i);
+      moveDroppedItem(dragFrom, i, e);
       dragFrom = null;
     });
 
@@ -1463,24 +1648,31 @@ function stopReadingOrder() {
 
 function playReadingOrder() {
   if (!speechIsAvailable()) return;
-  const items = listData
-    .map((item) => ({ id: item.id, text: spokenUtteranceText(item.ann) }))
-    .filter((item) => item.text);
-  if (!items.length) return;
+  const initialItems = listData.filter((item) => spokenUtteranceText(item.ann));
+  if (!initialItems.length) return;
 
   window.speechSynthesis.cancel();
   const runId = ++speechRunId;
-  let index = 0;
+  let currentItemId = null;
 
   function speakNext() {
     if (runId !== speechRunId) return;
-    if (index >= items.length) {
+    const items = listData
+      .map((item) => ({ id: item.id, text: spokenUtteranceText(item.ann) }))
+      .filter((item) => item.text);
+    const currentIndex = currentItemId === null
+      ? -1
+      : items.findIndex((item) => item.id === currentItemId);
+    const nextIndex = currentItemId === null ? 0 : currentIndex + 1;
+
+    if ((currentItemId !== null && currentIndex === -1) || nextIndex >= items.length) {
       setSpeakingItem(null);
       updateSpeechButton();
       return;
     }
 
-    const item = items[index++];
+    const item = items[nextIndex];
+    currentItemId = item.id;
     setSpeakingItem(item.id);
     updateSpeechButton();
     const utterance = new SpeechSynthesisUtterance(item.text);
