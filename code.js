@@ -308,13 +308,7 @@ function buildList(frame) {
 async function frameAnnotationState(frame) {
   let panel = false;
   try { panel = !!(await getExistingPanel(frame)); } catch (e) {}
-  let native = false;
-  for (const { node } of hierarchicalItems(frame)) {
-    if ("getPluginData" in node && node.getPluginData(NATIVE_KEY)) {
-      native = true;
-      break;
-    }
-  }
+  const native = hasNativeAnnotations(frame);
   return { panel, native };
 }
 
@@ -736,6 +730,27 @@ function buildControls(frame) {
 // wrote on a node, so we can update/remove only our own — never the user's.
 const NATIVE_KEY = "a11yNativeLabel";
 
+// Walk every node in a frame, including nodes that are no longer annotated.
+// This lets native sync remove a stale annotation after its source annotation
+// is deleted or changed to Non-accessible.
+function frameDescendants(frame) {
+  const out = [];
+  const visit = (node) => {
+    out.push(node);
+    if ("children" in node) {
+      for (const child of node.children) visit(child);
+    }
+  };
+  visit(frame);
+  return out;
+}
+
+function hasNativeAnnotations(frame) {
+  return frameDescendants(frame).some(
+    (node) => "getPluginData" in node && !!node.getPluginData(NATIVE_KEY)
+  );
+}
+
 // Find the built-in "Accessibility" annotation category. Returns undefined
 // (no category) rather than guessing a wrong one when none matches.
 async function accessibilityCategoryId() {
@@ -753,6 +768,11 @@ async function accessibilityCategoryId() {
 // annotation (visible in Dev Mode), preserving any annotations the plugin
 // didn't create and replacing only its own previous one (idempotent).
 async function syncNativeAnnotations(frame) {
+  // Clear all of this plugin's previous native annotations first. In addition
+  // to replacing changed labels, this removes stale output from elements that
+  // were deleted from the reading order or changed to Non-accessible.
+  removeNativeAnnotations(frame);
+
   const categoryId = await accessibilityCategoryId();
   let count = 0;
   for (const { node, ann } of hierarchicalItems(frame)) {
@@ -775,7 +795,7 @@ async function syncNativeAnnotations(frame) {
 // Remove only the native annotations this plugin created for the frame.
 function removeNativeAnnotations(frame) {
   let removed = 0;
-  for (const { node } of hierarchicalItems(frame)) {
+  for (const node of frameDescendants(frame)) {
     if (!("annotations" in node) || !("getPluginData" in node)) continue;
     const prev = node.getPluginData(NATIVE_KEY);
     if (!prev) continue;
@@ -786,6 +806,10 @@ function removeNativeAnnotations(frame) {
     node.setPluginData(NATIVE_KEY, "");
   }
   return removed;
+}
+
+async function syncNativeAnnotationsIfEnabled(frame) {
+  if (hasNativeAnnotations(frame)) await syncNativeAnnotations(frame);
 }
 
 // ---------------------------------------------------------------------------
@@ -1107,9 +1131,11 @@ figma.ui.onmessage = async (msg) => {
           break;
         }
         await pushList();
+        const frame = topLevelFrameOf(node);
         // live-accumulate: keep an existing panel in sync, but debounced so it
         // doesn't rebuild every text node on every keystroke.
-        schedulePanelRegen(topLevelFrameOf(node));
+        schedulePanelRegen(frame);
+        await syncNativeAnnotationsIfEnabled(frame);
       }
       break;
     }
@@ -1121,6 +1147,7 @@ figma.ui.onmessage = async (msg) => {
         writeAnnotation(node, null);
         await pushSelection();
         await regeneratePanel(frame, false);
+        await syncNativeAnnotationsIfEnabled(frame);
       }
       break;
     }
@@ -1330,6 +1357,7 @@ figma.ui.onmessage = async (msg) => {
       }
       await pushSelection();
       await regeneratePanel(frame, false);
+      await syncNativeAnnotationsIfEnabled(frame);
       figma.ui.postMessage({ type: "annotate-done" });
       figma.notify(
         created
@@ -1361,6 +1389,7 @@ figma.ui.onmessage = async (msg) => {
         const { created, skipped, unmatched } = await applyGenerated(elements);
         await pushSelection();
         await regeneratePanel(frame, false);
+        await syncNativeAnnotationsIfEnabled(frame);
         let m = created
           ? "AI added " + created + " annotation" + (created === 1 ? "" : "s")
           : "AI returned no new elements";
