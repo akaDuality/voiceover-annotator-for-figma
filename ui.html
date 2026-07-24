@@ -156,7 +156,7 @@
     background: color-mix(in srgb, var(--accent) 12%, var(--bg));
     box-shadow: inset 2px 0 0 var(--accent);
   }
-  #list.suppress-hover .vo-item:hover:not(.sel):not(.speaking) {
+  #list.suppress-hover .vo-item:hover:not(.sel):not(.speaking):not(.is-container) {
     background: var(--bg);
   }
   .vo-num {
@@ -174,7 +174,7 @@
 
   .vo-grip {
     flex: 0 0 auto; cursor: grab; color: var(--text-secondary); padding: 2px 1px;
-    margin-top: 1px; user-select: none; line-height: 1;
+    margin-top: 1px; user-select: none; line-height: 1; transform: translateX(-2.5px);
   }
   .vo-grip:active { cursor: grabbing; }
   .vo-reorder { flex: 0 0 auto; display: flex; flex-direction: column; gap: 2px; }
@@ -265,7 +265,7 @@
 
   .vo-utterance .container-label { font-weight: 600; }
   .vo-item.is-container { background: var(--bg-secondary); }
-  .vo-item.is-container .vo-num { visibility: hidden; }
+  .vo-item.is-container .vo-num { display: none; }
 
   /* resize grip */
   #resize {
@@ -1495,35 +1495,83 @@ function animateDroppedRow(previousPositions, movedId, dropPosition, sourceRect)
   }));
 }
 
-// move item at index `from` to index `to` within listData, then persist
-function moveItem(from, to, animateRows) {
-  if (to < 0 || to >= listData.length || from === to) return;
+function subtreeEndIndex(start) {
+  const depth = listData[start].depth || 0;
+  let end = start;
+  while (end + 1 < listData.length && (listData[end + 1].depth || 0) > depth) end++;
+  return end;
+}
+
+// Resolve a hovered descendant to the ancestor that lives beside the dragged
+// item. This makes the bottom of a container's subtree act as an outer drop
+// zone when a sibling container is being dragged over it.
+function dropTargetFor(from, hover) {
+  if (from < 0 || hover < 0 || from >= listData.length || hover >= listData.length) return null;
+  const source = listData[from];
+  const sourceEnd = subtreeEndIndex(from);
+  if (hover >= from && hover <= sourceEnd) return null;
+
+  const byId = new Map(listData.map((item, index) => [item.id, index]));
+  let anchor = hover;
+  while (listData[anchor].parentId !== source.parentId) {
+    const parentIndex = byId.get(listData[anchor].parentId);
+    if (parentIndex === undefined) return null;
+    anchor = parentIndex;
+  }
+  if (anchor >= from && anchor <= sourceEnd) return null;
+
+  const after = anchor > sourceEnd;
+  const boundary = after ? subtreeEndIndex(anchor) : anchor;
+  return {
+    anchor,
+    after,
+    boundary,
+    insertion: after ? subtreeEndIndex(anchor) + 1 : anchor,
+  };
+}
+
+function moveSubtree(from, target, animateRows, dropEvent) {
+  if (!target) return;
   const previousPositions = animateRows ? rowPositions() : null;
-  const moved = listData.splice(from, 1)[0];
-  listData.splice(to, 0, moved);
+  const sourceEnd = subtreeEndIndex(from);
+  const movedCount = sourceEnd - from + 1;
+  let insertion = target.insertion;
+  if (insertion > sourceEnd) insertion -= movedCount;
+  if (insertion === from) return;
+  const moved = listData.splice(from, movedCount);
+  listData.splice(insertion, 0, ...moved);
   renderList();
-  if (previousPositions) {
+  if (dropEvent) {
+    const sourceRow = rowById(moved[0].id);
+    if (!sourceRow) {
+      sendReorder();
+      return;
+    }
+    animateDroppedRow(
+      previousPositions,
+      moved[0].id,
+      {
+        x: dropEvent.clientX - dragPointerOffset.x,
+        y: dropEvent.clientY - dragPointerOffset.y,
+      },
+      sourceRow.getBoundingClientRect()
+    );
+  } else if (previousPositions) {
     animateReorderedRows(previousPositions);
   } else {
     sendReorder();
   }
 }
 
-function moveDroppedItem(from, to, event) {
-  if (to < 0 || to >= listData.length || from === to) return;
-  const sourceRow = rowById(listData[from].id);
-  if (!sourceRow) return;
+// Move a sibling (and its whole subtree) before/after another sibling.
+function moveItem(from, to, animateRows) {
+  const target = dropTargetFor(from, to);
+  moveSubtree(from, target, animateRows, null);
+}
 
-  const previousPositions = rowPositions();
-  const sourceRect = sourceRow.getBoundingClientRect();
-  const dropPosition = {
-    x: event.clientX - dragPointerOffset.x,
-    y: event.clientY - dragPointerOffset.y
-  };
-  const moved = listData.splice(from, 1)[0];
-  listData.splice(to, 0, moved);
-  renderList();
-  animateDroppedRow(previousPositions, moved.id, dropPosition, sourceRect);
+function clearDropIndicators() {
+  document.querySelectorAll("#list .vo-item").forEach((row) =>
+    row.classList.remove("drop-before", "drop-after"));
 }
 
 function renderList() {
@@ -1562,6 +1610,10 @@ function renderList() {
     row.addEventListener("click", () => {
       parent.postMessage({ pluginMessage: { type: "select", id: item.id } }, "*");
     });
+    row.addEventListener("mouseenter", () => {
+      if (dragFrom !== null) return;
+      parent.postMessage({ pluginMessage: { type: "hover-select", id: item.id } }, "*");
+    });
     row.querySelector(".ro-btn.up").addEventListener("click", (e) => {
       e.stopPropagation();
       moveItem(i, prevSiblingIndex(i), true);
@@ -1590,16 +1642,22 @@ function renderList() {
     row.addEventListener("dragover", (e) => {
       e.preventDefault();
       if (dragFrom === null || dragFrom === i) return;
-      if (listData[dragFrom].parentId !== item.parentId) { e.dataTransfer.dropEffect = "none"; return; }
-      row.classList.toggle("drop-before", i < dragFrom);
-      row.classList.toggle("drop-after", i > dragFrom);
+      const target = dropTargetFor(dragFrom, i);
+      clearDropIndicators();
+      if (!target) { e.dataTransfer.dropEffect = "none"; return; }
+      const boundaryRow = rowById(listData[target.boundary].id);
+      if (boundaryRow) boundaryRow.classList.add(target.after ? "drop-after" : "drop-before");
     });
-    row.addEventListener("dragleave", () => row.classList.remove("drop-before", "drop-after"));
+    row.addEventListener("dragleave", (e) => {
+      if (!wrap.contains(e.relatedTarget)) clearDropIndicators();
+    });
     row.addEventListener("drop", (e) => {
       e.preventDefault();
       if (dragFrom === null || dragFrom === i) return;
-      if (listData[dragFrom].parentId !== item.parentId) { dragFrom = null; return; } // same parent only
-      moveDroppedItem(dragFrom, i, e);
+      const target = dropTargetFor(dragFrom, i);
+      clearDropIndicators();
+      if (!target) { dragFrom = null; return; }
+      moveSubtree(dragFrom, target, true, e);
       dragFrom = null;
     });
 
