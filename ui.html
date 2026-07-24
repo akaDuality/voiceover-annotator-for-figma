@@ -148,10 +148,17 @@
   /* ---- VoiceOver list (left panel mirror) ---- */
   .vo-item {
     display: flex; gap: 9px; padding: 9px 16px; cursor: pointer; align-items: flex-start;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--border); background: var(--bg);
   }
   .vo-item:hover { background: var(--bg-hover); }
-  .vo-item.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .vo-item.sel { background: color-mix(in srgb, var(--accent) 16%, var(--bg)); }
+  .vo-item.speaking {
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  #list.suppress-hover .vo-item:hover:not(.sel):not(.speaking):not(.is-container) {
+    background: var(--bg);
+  }
   .vo-num {
     flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%;
     background: var(--bg-hover); color: var(--text-secondary);
@@ -167,7 +174,7 @@
 
   .vo-grip {
     flex: 0 0 auto; cursor: grab; color: var(--text-secondary); padding: 2px 1px;
-    margin-top: 1px; user-select: none; line-height: 1;
+    margin-top: 1px; user-select: none; line-height: 1; transform: translateX(-2.5px);
   }
   .vo-grip:active { cursor: grabbing; }
   .vo-reorder { flex: 0 0 auto; display: flex; flex-direction: column; gap: 2px; }
@@ -178,14 +185,13 @@
   }
   .ro-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
   .ro-btn:disabled { opacity: .3; cursor: default; }
-  .vo-item.dragging { opacity: .45; }
   .vo-item.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
   .vo-item.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
-  .list-hint {
-    padding: 8px 16px; font-size: 10px; color: var(--text-secondary);
-    border-bottom: 1px solid var(--border); background: var(--bg-secondary);
+  .vo-item.drop-ghost {
+    position: fixed; z-index: 1000; margin: 0; pointer-events: none;
+    opacity: .45; box-shadow: 0 4px 14px rgba(0, 0, 0, .22);
   }
-
+  #list.reordering .ro-btn { pointer-events: none; }
   .empty-state {
     padding: 40px 24px; text-align: center; color: var(--text-secondary); font-size: 12px;
   }
@@ -236,6 +242,15 @@
     flex: 0 0 auto; width: 30px; padding-left: 0; padding-right: 0; font-size: 20px;
   }
 
+  /* Reading-order actions: full-width outline button + matching square icon. */
+  .reading-actions { display: flex; gap: var(--fp-space-2); }
+  .reading-actions #highlight { flex: 1 1 auto; width: auto; }
+  .reading-actions #play-reading-order {
+    flex: 0 0 var(--fp-space-8); width: var(--fp-space-8); padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .reading-actions #play-reading-order svg { display: block; }
+
   /* segmented control */
   .segmented {
     display: flex; background: var(--bg-hover); border-radius: 7px; padding: 2px; gap: 2px;
@@ -250,7 +265,7 @@
 
   .vo-utterance .container-label { font-weight: 600; }
   .vo-item.is-container { background: var(--bg-secondary); }
-  .vo-item.is-container .vo-num { visibility: hidden; }
+  .vo-item.is-container .vo-num { display: none; }
 
   /* resize grip */
   #resize {
@@ -722,14 +737,18 @@
 
     <!-- ============ READING ORDER LIST ============ -->
     <div class="page" id="page-list">
-      <div class="section">
+      <div class="section reading-actions">
         <button class="btn full" id="highlight">Outline accessibility frames</button>
+        <button class="btn" id="play-reading-order" type="button" title="Listen to reading order" aria-label="Listen to reading order">
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M3 1.75v8.5L10 6 3 1.75Z" fill="currentColor"/>
+          </svg>
+        </button>
       </div>
       <div id="list-empty" class="empty-state">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
         <div>No annotations yet.<br/>Annotate layers to build the reading order.</div>
       </div>
-      <div class="list-hint" id="list-hint">Drag rows — or use ▲▼ — to set the VoiceOver reading order.</div>
       <div id="list"></div>
     </div>
   </div>
@@ -830,6 +849,8 @@ let currentId = null;
 let ann = blankAnnotation();
 let listData = [];
 let saveTimer = null;
+let speechRunId = 0;
+let speakingItemId = null;
 // per-field autocomplete sources from the selected layer's inner text nodes
 let suggest = { label: "", value: "" };
 
@@ -904,8 +925,10 @@ function utteranceParts(a) {
   else main = label || value;
 
   // adjustable position "2 of 3"
+  let enumeratedPosition = null;
   if (a.adjustable && a.enumerated && a.values && a.values.length > 1) {
     const pos = Math.min(Math.max(a.selectedIndex || 0, 0), a.values.length - 1) + 1;
+    enumeratedPosition = { current: pos, total: a.values.length };
     main += ", " + pos + " of " + a.values.length;
   }
 
@@ -923,7 +946,7 @@ function utteranceParts(a) {
   if (tt.indexOf("textInput") !== -1) traits.push("Text Field");
   if (t.indexOf("disabled") !== -1) traits.push("Dimmed");
 
-  return { main, traits, hint: (a.hint || "").trim() };
+  return { main, traits, hint: (a.hint || "").trim(), enumeratedPosition };
 }
 
 // custom descriptions ("value, label") + custom actions, shown as indented
@@ -942,6 +965,47 @@ function utteranceText(a) {
   let s = p.main;
   for (const tr of p.traits) s += ". " + tr;
   if (p.traits.length) s += ".";
+  if (p.hint) s += (s.endsWith(".") || s === "" ? " " : ". ") + p.hint;
+  return s.trim();
+}
+
+// Keep the visible Reading Order terminology in English, but speak VoiceOver
+// traits in the language of the element's label/value/hint.
+function spokenUtteranceText(a) {
+  const p = utteranceParts(a);
+  if (!p) return "";
+  if (p.container) return p.main;
+
+  const isRussian = /[\u0400-\u04FF]/.test([p.main, p.hint].join(" "));
+  const russianTraits = {
+    "Selected": "Выбрано",
+    "Heading": "Заголовок",
+    "Adjustable": "Регулируется",
+    "Button": "Кнопка",
+    "Switch Button": "Переключатель",
+    "Link": "Ссылка",
+    "Image": "Изображение",
+    "Search Field": "Поле поиска",
+    "Text Field": "Текстовое поле",
+    "Dimmed": "Недоступно",
+  };
+  const traits = isRussian
+    ? p.traits.map((trait) => russianTraits[trait] || trait)
+    : p.traits;
+
+  let spokenMain = p.main;
+  if (isRussian && p.enumeratedPosition) {
+    const position = p.enumeratedPosition;
+    const englishSuffix = ", " + position.current + " of " + position.total;
+    if (spokenMain.endsWith(englishSuffix)) {
+      spokenMain = spokenMain.slice(0, -englishSuffix.length) +
+        ", " + position.current + " из " + position.total;
+    }
+  }
+
+  let s = spokenMain;
+  for (const trait of traits) s += ". " + trait;
+  if (traits.length) s += ".";
   if (p.hint) s += (s.endsWith(".") || s === "" ? " " : ". ") + p.hint;
   return s.trim();
 }
@@ -1144,7 +1208,10 @@ function renderDescriptions() {
 function onChange() {
   updatePreview();
   if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(save, 220);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    save();
+  }, 220);
 }
 
 function updatePreview() {
@@ -1277,6 +1344,8 @@ document.querySelectorAll(".tab").forEach((tab) => {
 // Reading order list
 // ===========================================================================
 let dragFrom = null;
+let dragPointerOffset = { x: 0, y: 0 };
+let hoverSuppressionGeneration = 0;
 
 function sendReorder() {
   parent.postMessage(
@@ -1285,21 +1354,237 @@ function sendReorder() {
   );
 }
 
-// move item at index `from` to index `to` within listData, then persist
-function moveItem(from, to) {
-  if (to < 0 || to >= listData.length || from === to) return;
-  const moved = listData.splice(from, 1)[0];
-  listData.splice(to, 0, moved);
+function rowPositions() {
+  const positions = new Map();
+  document.querySelectorAll("#list .vo-item").forEach((row) => {
+    positions.set(row.dataset.itemId, row.getBoundingClientRect().top);
+  });
+  return positions;
+}
+
+function rowById(id) {
+  return Array.from(document.querySelectorAll("#list .vo-item"))
+    .find((row) => row.dataset.itemId === id);
+}
+
+function softSelectItem(id) {
+  if (!id) return;
+  parent.postMessage({ pluginMessage: { type: "soft-select", id } }, "*");
+}
+
+function suppressHoverDuringReorder(wrap) {
+  const generation = ++hoverSuppressionGeneration;
+  let reorderFinished = false;
+  let pointerMoved = false;
+  wrap.classList.add("suppress-hover");
+  const onPointerMove = () => {
+    if (generation !== hoverSuppressionGeneration) {
+      document.removeEventListener("pointermove", onPointerMove);
+      return;
+    }
+    pointerMoved = true;
+    if (!reorderFinished) return;
+    wrap.classList.remove("suppress-hover");
+    document.removeEventListener("pointermove", onPointerMove);
+  };
+  document.addEventListener("pointermove", onPointerMove);
+  return () => {
+    if (generation !== hoverSuppressionGeneration) return;
+    reorderFinished = true;
+    if (!pointerMoved) return;
+    wrap.classList.remove("suppress-hover");
+    document.removeEventListener("pointermove", onPointerMove);
+  };
+}
+
+function animateReorderedRows(previousPositions) {
+  const wrap = document.getElementById("list");
+  const animatedRows = [];
+  wrap.classList.add("reordering");
+  const finishHoverSuppression = suppressHoverDuringReorder(wrap);
+  wrap.querySelectorAll(".vo-item").forEach((row) => {
+    const previousTop = previousPositions.get(row.dataset.itemId);
+    if (previousTop === undefined) return;
+    const deltaY = previousTop - row.getBoundingClientRect().top;
+    if (deltaY === 0) return;
+    row.style.transition = "none";
+    row.style.transform = "translateY(" + deltaY + "px)";
+    animatedRows.push(row);
+  });
+
+  // Commit the inverse positions before starting the transition. Two frames
+  // are intentional: Figma's embedded browser may batch a single RAF with the
+  // DOM rebuild and otherwise paint only the final state.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    animatedRows.forEach((row) => {
+      row.style.transition = "transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)";
+      row.style.transform = "translateY(0)";
+    });
+    setTimeout(() => {
+      animatedRows.forEach((row) => {
+        row.style.transition = "";
+        row.style.transform = "";
+      });
+      wrap.classList.remove("reordering");
+      finishHoverSuppression();
+      sendReorder();
+    }, 300);
+  }));
+}
+
+function animateDroppedRow(previousPositions, movedId, dropPosition, sourceRect) {
+  const wrap = document.getElementById("list");
+  const destinationRow = rowById(movedId);
+  if (!destinationRow) {
+    sendReorder();
+    return;
+  }
+
+  const destinationRect = destinationRow.getBoundingClientRect();
+  const ghost = destinationRow.cloneNode(true);
+  const animatedRows = [];
+
+  wrap.classList.add("reordering");
+  const finishHoverSuppression = suppressHoverDuringReorder(wrap);
+  destinationRow.style.visibility = "hidden";
+
+  wrap.querySelectorAll(".vo-item").forEach((row) => {
+    if (row.dataset.itemId === movedId) return;
+    const previousTop = previousPositions.get(row.dataset.itemId);
+    if (previousTop === undefined) return;
+    const deltaY = previousTop - row.getBoundingClientRect().top;
+    if (deltaY === 0) return;
+    row.style.transition = "none";
+    row.style.transform = "translateY(" + deltaY + "px)";
+    animatedRows.push(row);
+  });
+
+  ghost.classList.remove("dragging", "drop-before", "drop-after");
+  ghost.classList.add("drop-ghost");
+  ghost.removeAttribute("draggable");
+  ghost.style.left = dropPosition.x + "px";
+  ghost.style.top = dropPosition.y + "px";
+  ghost.style.width = sourceRect.width + "px";
+  ghost.style.height = sourceRect.height + "px";
+  ghost.style.transition = "none";
+  ghost.style.transform = "translate(0, 0)";
+  document.body.appendChild(ghost);
+
+  const deltaX = destinationRect.left - dropPosition.x;
+  const deltaY = destinationRect.top - dropPosition.y;
+
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    animatedRows.forEach((row) => {
+      row.style.transition = "transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)";
+      row.style.transform = "translateY(0)";
+    });
+    ghost.style.transition =
+      "transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), " +
+      "opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), " +
+      "box-shadow 0.3s cubic-bezier(0.16, 1, 0.3, 1)";
+    ghost.style.transform = "translate(" + deltaX + "px, " + deltaY + "px)";
+    ghost.style.opacity = "1";
+    ghost.style.boxShadow = "none";
+
+    setTimeout(() => {
+      animatedRows.forEach((row) => {
+        row.style.transition = "";
+        row.style.transform = "";
+      });
+      destinationRow.style.visibility = "";
+      ghost.remove();
+      wrap.classList.remove("reordering");
+      finishHoverSuppression();
+      sendReorder();
+    }, 300);
+  }));
+}
+
+function subtreeEndIndex(start) {
+  const depth = listData[start].depth || 0;
+  let end = start;
+  while (end + 1 < listData.length && (listData[end + 1].depth || 0) > depth) end++;
+  return end;
+}
+
+// Resolve a hovered descendant to the ancestor that lives beside the dragged
+// item. This makes the bottom of a container's subtree act as an outer drop
+// zone when a sibling container is being dragged over it.
+function dropTargetFor(from, hover) {
+  if (from < 0 || hover < 0 || from >= listData.length || hover >= listData.length) return null;
+  const source = listData[from];
+  const sourceEnd = subtreeEndIndex(from);
+  if (hover >= from && hover <= sourceEnd) return null;
+
+  const byId = new Map(listData.map((item, index) => [item.id, index]));
+  let anchor = hover;
+  while (listData[anchor].parentId !== source.parentId) {
+    const parentIndex = byId.get(listData[anchor].parentId);
+    if (parentIndex === undefined) return null;
+    anchor = parentIndex;
+  }
+  if (anchor >= from && anchor <= sourceEnd) return null;
+
+  const after = anchor > sourceEnd;
+  const boundary = after ? subtreeEndIndex(anchor) : anchor;
+  return {
+    anchor,
+    after,
+    boundary,
+    insertion: after ? subtreeEndIndex(anchor) + 1 : anchor,
+  };
+}
+
+function moveSubtree(from, target, animateRows, dropEvent) {
+  if (!target) return;
+  const previousPositions = animateRows ? rowPositions() : null;
+  const sourceEnd = subtreeEndIndex(from);
+  const movedCount = sourceEnd - from + 1;
+  let insertion = target.insertion;
+  if (insertion > sourceEnd) insertion -= movedCount;
+  if (insertion === from) return;
+  const moved = listData.splice(from, movedCount);
+  listData.splice(insertion, 0, ...moved);
   renderList();
-  sendReorder();
+  if (dropEvent) {
+    const sourceRow = rowById(moved[0].id);
+    if (!sourceRow) {
+      sendReorder();
+      return;
+    }
+    animateDroppedRow(
+      previousPositions,
+      moved[0].id,
+      {
+        x: dropEvent.clientX - dragPointerOffset.x,
+        y: dropEvent.clientY - dragPointerOffset.y,
+      },
+      sourceRow.getBoundingClientRect()
+    );
+  } else if (previousPositions) {
+    animateReorderedRows(previousPositions);
+  } else {
+    sendReorder();
+  }
+}
+
+// Move a sibling (and its whole subtree) before/after another sibling.
+function moveItem(from, to, animateRows) {
+  const target = dropTargetFor(from, to);
+  moveSubtree(from, target, animateRows, null);
+}
+
+function clearDropIndicators() {
+  document.querySelectorAll("#list .vo-item").forEach((row) =>
+    row.classList.remove("drop-before", "drop-after"));
 }
 
 function renderList() {
   const wrap = document.getElementById("list");
   const visible = listData.filter((item) => utteranceText(item.ann));
   document.getElementById("list-count").textContent = visible.length;
+  updateSpeechButton();
   document.getElementById("list-empty").classList.toggle("hidden", visible.length > 0);
-  document.getElementById("list-hint").classList.toggle("hidden", visible.length === 0);
   wrap.innerHTML = "";
 
   let num = 0;     // visible position (for first/last button state)
@@ -1312,7 +1597,8 @@ function renderList() {
     const hasPrev = prevSiblingIndex(i) !== i; // only reorder within the same parent
     const hasNext = nextSiblingIndex(i) !== i;
     const row = document.createElement("div");
-    row.className = "vo-item" + (item.id === currentId ? " sel" : "") + (isContainer ? " is-container" : "");
+    row.className = "vo-item" + (item.id === currentId ? " sel" : "") + (item.id === speakingItemId ? " speaking" : "") + (isContainer ? " is-container" : "");
+    row.dataset.itemId = item.id;
     row.draggable = true;
     row.style.paddingLeft = 16 + (item.depth || 0) * 14 + "px";
     row.innerHTML =
@@ -1331,16 +1617,21 @@ function renderList() {
     });
     row.querySelector(".ro-btn.up").addEventListener("click", (e) => {
       e.stopPropagation();
-      moveItem(i, prevSiblingIndex(i));
+      moveItem(i, prevSiblingIndex(i), true);
     });
     row.querySelector(".ro-btn.down").addEventListener("click", (e) => {
       e.stopPropagation();
-      moveItem(i, nextSiblingIndex(i));
+      moveItem(i, nextSiblingIndex(i), true);
     });
 
     // drag & drop
     row.addEventListener("dragstart", (e) => {
       dragFrom = i;
+      const rect = row.getBoundingClientRect();
+      dragPointerOffset = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      };
       row.classList.add("dragging");
       e.dataTransfer.effectAllowed = "move";
     });
@@ -1352,21 +1643,111 @@ function renderList() {
     row.addEventListener("dragover", (e) => {
       e.preventDefault();
       if (dragFrom === null || dragFrom === i) return;
-      if (listData[dragFrom].parentId !== item.parentId) { e.dataTransfer.dropEffect = "none"; return; }
-      row.classList.toggle("drop-before", i < dragFrom);
-      row.classList.toggle("drop-after", i > dragFrom);
+      const target = dropTargetFor(dragFrom, i);
+      clearDropIndicators();
+      if (!target) { e.dataTransfer.dropEffect = "none"; return; }
+      const boundaryRow = rowById(listData[target.boundary].id);
+      if (boundaryRow) boundaryRow.classList.add(target.after ? "drop-after" : "drop-before");
     });
-    row.addEventListener("dragleave", () => row.classList.remove("drop-before", "drop-after"));
+    row.addEventListener("dragleave", (e) => {
+      if (!wrap.contains(e.relatedTarget)) clearDropIndicators();
+    });
     row.addEventListener("drop", (e) => {
       e.preventDefault();
       if (dragFrom === null || dragFrom === i) return;
-      if (listData[dragFrom].parentId !== item.parentId) { dragFrom = null; return; } // same parent only
-      moveItem(dragFrom, i);
+      const target = dropTargetFor(dragFrom, i);
+      clearDropIndicators();
+      if (!target) { dragFrom = null; return; }
+      moveSubtree(dragFrom, target, true, e);
       dragFrom = null;
     });
 
     wrap.appendChild(row);
   });
+}
+
+// ===========================================================================
+// Local speech preview for the current reading order
+// ===========================================================================
+function speechIsAvailable() {
+  return "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
+}
+
+function setSpeakingItem(id) {
+  speakingItemId = id;
+  if (id) softSelectItem(id);
+  document.querySelectorAll(".vo-item").forEach((row) => {
+    row.classList.toggle("speaking", !!id && row.dataset.itemId === id);
+  });
+  const active = Array.from(document.querySelectorAll(".vo-item"))
+    .find((row) => row.dataset.itemId === id);
+  if (active) active.scrollIntoView({ block: "nearest" });
+}
+
+function updateSpeechButton() {
+  const btn = document.getElementById("play-reading-order");
+  if (!btn) return;
+  const speaking = speakingItemId !== null;
+  const hasItems = listData.some((item) => utteranceText(item.ann));
+  btn.disabled = !speechIsAvailable() || (!hasItems && !speaking);
+  btn.title = speechIsAvailable()
+    ? (speaking ? "Stop reading" : "Listen to reading order")
+    : "Speech preview is unavailable in this version of Figma";
+  btn.setAttribute("aria-label", btn.title);
+  btn.innerHTML = speaking
+    ? '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="1" y="1" width="8" height="8" rx="1" fill="currentColor"/></svg>'
+    : '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.75v8.5L10 6 3 1.75Z" fill="currentColor"/></svg>';
+}
+
+function stopReadingOrder() {
+  speechRunId++;
+  if (speechIsAvailable()) window.speechSynthesis.cancel();
+  setSpeakingItem(null);
+  updateSpeechButton();
+}
+
+function playReadingOrder() {
+  if (!speechIsAvailable()) return;
+  const initialItems = listData.filter((item) => spokenUtteranceText(item.ann));
+  if (!initialItems.length) return;
+
+  window.speechSynthesis.cancel();
+  const runId = ++speechRunId;
+  let currentItemId = null;
+
+  function speakNext() {
+    if (runId !== speechRunId) return;
+    const items = listData
+      .map((item) => ({ id: item.id, text: spokenUtteranceText(item.ann) }))
+      .filter((item) => item.text);
+    const currentIndex = currentItemId === null
+      ? -1
+      : items.findIndex((item) => item.id === currentItemId);
+    const nextIndex = currentItemId === null ? 0 : currentIndex + 1;
+
+    if ((currentItemId !== null && currentIndex === -1) || nextIndex >= items.length) {
+      setSpeakingItem(null);
+      updateSpeechButton();
+      return;
+    }
+
+    const item = items[nextIndex];
+    currentItemId = item.id;
+    setSpeakingItem(item.id);
+    updateSpeechButton();
+    const utterance = new SpeechSynthesisUtterance(item.text);
+    const language = /[\u0400-\u04FF]/.test(item.text) ? "ru" : "en";
+    utterance.lang = language === "ru" ? "ru-RU" : "en-US";
+    utterance.rate = 1.20;
+    utterance.onend = () => setTimeout(speakNext, 180);
+    utterance.onerror = (event) => {
+      if (event.error === "canceled" || event.error === "interrupted") return;
+      setTimeout(speakNext, 180);
+    };
+    window.speechSynthesis.speak(utterance);
+  }
+
+  speakNext();
 }
 
 // nearest visible sibling (same reading-order parent) in each direction
@@ -1392,6 +1773,10 @@ document.getElementById("native-annotate").addEventListener("click", () =>
   parent.postMessage({ pluginMessage: { type: "native-annotate" } }, "*"));
 document.getElementById("highlight").addEventListener("click", () =>
   parent.postMessage({ pluginMessage: { type: "highlight" } }, "*"));
+document.getElementById("play-reading-order").addEventListener("click", () => {
+  if (speakingItemId !== null) stopReadingOrder();
+  else playReadingOrder();
+});
 document.getElementById("clear-highlight").addEventListener("click", () =>
   parent.postMessage({ pluginMessage: { type: "clear-highlight" } }, "*"));
 document.getElementById("export-vodesign").addEventListener("click", () => {
@@ -1694,6 +2079,7 @@ function buildZip(entries) {
   });
 })();
 
+updateSpeechButton();
 parent.postMessage({ pluginMessage: { type: "ready" } }, "*");
 </script>
 </body>
