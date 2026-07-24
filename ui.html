@@ -1367,6 +1367,11 @@ function rowById(id) {
     .find((row) => row.dataset.itemId === id);
 }
 
+function softSelectItem(id) {
+  if (!id) return;
+  parent.postMessage({ pluginMessage: { type: "soft-select", id } }, "*");
+}
+
 function suppressHoverDuringReorder(wrap) {
   const generation = ++hoverSuppressionGeneration;
   let reorderFinished = false;
@@ -1610,10 +1615,6 @@ function renderList() {
     row.addEventListener("click", () => {
       parent.postMessage({ pluginMessage: { type: "select", id: item.id } }, "*");
     });
-    row.addEventListener("mouseenter", () => {
-      if (dragFrom !== null) return;
-      parent.postMessage({ pluginMessage: { type: "hover-select", id: item.id } }, "*");
-    });
     row.querySelector(".ro-btn.up").addEventListener("click", (e) => {
       e.stopPropagation();
       moveItem(i, prevSiblingIndex(i), true);
@@ -1674,6 +1675,7 @@ function speechIsAvailable() {
 
 function setSpeakingItem(id) {
   speakingItemId = id;
+  if (id) softSelectItem(id);
   document.querySelectorAll(".vo-item").forEach((row) => {
     row.classList.toggle("speaking", !!id && row.dataset.itemId === id);
   });

@@ -1111,9 +1111,9 @@ async function applyGenerated(elements) {
 // Messages from the UI
 // ---------------------------------------------------------------------------
 
-// Rapid pointer movement can leave several getNodeByIdAsync calls in flight.
-// Only the most recent hovered row is allowed to update Figma's selection.
-let hoverSelectionSeq = 0;
+// Speech playback can leave several getNodeByIdAsync calls in flight.
+// Only the most recent soft-selection request may update Figma's selection.
+let softSelectionSeq = 0;
 
 figma.ui.onmessage = async (msg) => {
   switch (msg.type) {
@@ -1153,23 +1153,22 @@ figma.ui.onmessage = async (msg) => {
     }
 
     case "select": {
-      hoverSelectionSeq++; // a deliberate click supersedes any pending hover
+      softSelectionSeq++; // a deliberate click supersedes any pending soft selection
       const node = await figma.getNodeByIdAsync(msg.id);
       if (node && node.type !== "PAGE" && node.type !== "DOCUMENT") {
         figma.currentPage.selection = [node];
-        figma.viewport.scrollAndZoomIntoView([node]);
       }
       break;
     }
 
-    case "hover-select": {
-      const seq = ++hoverSelectionSeq;
+    case "soft-select": {
+      const seq = ++softSelectionSeq;
       const node = await figma.getNodeByIdAsync(msg.id);
-      if (seq !== hoverSelectionSeq) break;
+      if (seq !== softSelectionSeq) break;
       if (node && node.type !== "PAGE" && node.type !== "DOCUMENT") {
         const selected = figma.currentPage.selection;
-        // Avoid another selectionchange/render cycle when the rebuilt row under
-        // the stationary pointer reports the same hover again.
+        // Avoid another selectionchange/render cycle when playback reports the
+        // node that is already selected.
         if (selected.length !== 1 || selected[0].id !== node.id) {
           figma.currentPage.selection = [node];
         }
